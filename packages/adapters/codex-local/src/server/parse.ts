@@ -9,6 +9,7 @@ export function parseCodexJsonl(stdout: string) {
     cachedInputTokens: 0,
     outputTokens: 0,
   };
+  let costUsd = 0;
 
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -43,10 +44,12 @@ export function parseCodexJsonl(stdout: string) {
       usage.inputTokens = asNumber(usageObj.input_tokens, usage.inputTokens);
       usage.cachedInputTokens = asNumber(usageObj.cached_input_tokens, usage.cachedInputTokens);
       usage.outputTokens = asNumber(usageObj.output_tokens, usage.outputTokens);
+      costUsd = asNumber(event.total_cost_usd, asNumber(event.cost_usd, costUsd));
       continue;
     }
 
     if (type === "turn.failed") {
+      costUsd = asNumber(event.total_cost_usd, asNumber(event.cost_usd, costUsd));
       const err = parseObject(event.error);
       const msg = asString(err.message, "").trim();
       if (msg) errorMessage = msg;
@@ -57,6 +60,7 @@ export function parseCodexJsonl(stdout: string) {
     sessionId,
     summary: messages.join("\n\n").trim(),
     usage,
+    costUsd,
     errorMessage,
   };
 }
@@ -67,7 +71,7 @@ export function isCodexUnknownSessionError(stdout: string, stderr: string): bool
     .map((line) => line.trim())
     .filter(Boolean)
     .join("\n");
-  return /unknown (session|thread)|session .* not found|thread .* not found|conversation .* not found|missing rollout path for thread|state db missing rollout path/i.test(
+  return /unknown (session|thread)|session .* not found|thread .* not found|conversation .* not found|missing rollout path for thread|state db missing rollout path|no rollout found for thread id/i.test(
     haystack,
   );
 }

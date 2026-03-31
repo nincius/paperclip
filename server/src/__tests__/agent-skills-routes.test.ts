@@ -1,6 +1,9 @@
 import express from "express";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentRoutes } from "../routes/agents.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -55,6 +58,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAdapter = vi.hoisted(() => ({
   listSkills: vi.fn(),
   syncSkills: vi.fn(),
+  testEnvironment: vi.fn(),
 }));
 
 vi.mock("../services/index.js", () => ({
@@ -129,9 +133,65 @@ function makeAgent(adapterType: string) {
   };
 }
 
+let testPaperclipHome: string;
+
+async function listBundleFiles(rootPath: string, relativeDir = ""): Promise<string[]> {
+  const currentPath = relativeDir ? path.join(rootPath, relativeDir) : rootPath;
+  const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+  const output: string[] = [];
+  for (const entry of entries) {
+    const relativePath = relativeDir ? path.posix.join(relativeDir, entry.name) : entry.name;
+    if (entry.isDirectory()) {
+      output.push(...await listBundleFiles(rootPath, relativePath));
+      continue;
+    }
+    if (entry.isFile()) {
+      output.push(relativePath.replaceAll("\\", "/"));
+    }
+  }
+  return output.sort((left, right) => left.localeCompare(right));
+}
+
+async function buildBundle(rootPath: string, entryFile = "AGENTS.md") {
+  const files = await listBundleFiles(rootPath);
+  return {
+    agentId: "11111111-1111-4111-8111-111111111111",
+    companyId: "company-1",
+    mode: "managed",
+    rootPath,
+    managedRootPath: rootPath,
+    entryFile,
+    resolvedEntryPath: path.join(rootPath, entryFile),
+    editable: true,
+    warnings: [],
+    legacyPromptTemplateActive: false,
+    legacyBootstrapPromptTemplateActive: false,
+    files: await Promise.all(files.map(async (relativePath) => {
+      const absolutePath = path.join(rootPath, relativePath);
+      const stat = await fs.stat(absolutePath);
+      return {
+        path: relativePath,
+        size: stat.size,
+        language: "markdown",
+        markdown: relativePath.endsWith(".md"),
+        isEntryFile: relativePath === entryFile,
+        editable: true,
+        deprecated: false,
+        virtual: false,
+      };
+    })),
+  };
+}
+
 describe("agent skill routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    testPaperclipHome = path.join(
+      os.tmpdir(),
+      `paperclip-agent-routes-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    process.env.PAPERCLIP_HOME = testPaperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "test";
     mockAgentService.resolveByReference.mockResolvedValue({
       ambiguous: false,
       agent: makeAgent("claude_local"),
@@ -170,6 +230,12 @@ describe("agent skill routes", () => {
       entries: [],
       warnings: [],
     });
+    mockAdapter.testEnvironment.mockResolvedValue({
+      adapterType: "claude_local",
+      status: "pass",
+      checks: [],
+      testedAt: new Date().toISOString(),
+    });
     mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeAgent("claude_local"),
       adapterConfig: patch.adapterConfig ?? {},
@@ -189,18 +255,81 @@ describe("agent skill routes", () => {
       status: "pending",
       payload: input.payload ?? {},
     }));
+    mockAgentInstructionsService.getBundle.mockImplementation(async (agent: Record<string, unknown>) => {
+      const adapterConfig = (agent.adapterConfig as Record<string, unknown> | undefined) ?? {};
+      const rootPath = adapterConfig.instructionsRootPath;
+      const entryFile = String(adapterConfig.instructionsEntryFile ?? "AGENTS.md");
+      if (typeof rootPath !== "string") {
+        return {
+          agentId: String(agent.id),
+          companyId: String(agent.companyId),
+          mode: null,
+          rootPath: null,
+          managedRootPath: path.join(testPaperclipHome, "managed"),
+          entryFile,
+          resolvedEntryPath: null,
+          editable: false,
+          warnings: [],
+          legacyPromptTemplateActive: false,
+          legacyBootstrapPromptTemplateActive: false,
+          files: [],
+        };
+      }
+      return buildBundle(rootPath, entryFile);
+    });
     mockAgentInstructionsService.materializeManagedBundle.mockImplementation(
-      async (agent: Record<string, unknown>, files: Record<string, string>) => ({
-        bundle: null,
-        adapterConfig: {
+      async (agent: Record<string, unknown>, files: Record<string, string>) => {
+        const rootPath = path.join(testPaperclipHome, String(agent.id), "instructions");
+        await fs.mkdir(rootPath, { recursive: true });
+        for (const [relativePath, content] of Object.entries(files)) {
+          const absolutePath = path.join(rootPath, relativePath);
+          await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+          await fs.writeFile(absolutePath, content, "utf8");
+        }
+        const adapterConfig = {
           ...((agent.adapterConfig as Record<string, unknown> | undefined) ?? {}),
           instructionsBundleMode: "managed",
-          instructionsRootPath: `/tmp/${String(agent.id)}/instructions`,
+          instructionsRootPath: rootPath,
           instructionsEntryFile: "AGENTS.md",
-          instructionsFilePath: `/tmp/${String(agent.id)}/instructions/AGENTS.md`,
+          instructionsFilePath: path.join(rootPath, "AGENTS.md"),
           promptTemplate: files["AGENTS.md"] ?? "",
-        },
-      }),
+        };
+        return {
+          bundle: await buildBundle(rootPath),
+          adapterConfig,
+        };
+      },
+    );
+    mockAgentInstructionsService.writeFile.mockImplementation(
+      async (agent: Record<string, unknown>, relativePath: string, content: string) => {
+        const adapterConfig = (agent.adapterConfig as Record<string, unknown> | undefined) ?? {};
+        const rootPath = String(adapterConfig.instructionsRootPath);
+        const absolutePath = path.join(rootPath, relativePath);
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+        await fs.writeFile(absolutePath, content, "utf8");
+        const nextAdapterConfig = {
+          ...adapterConfig,
+          instructionsBundleMode: "managed",
+          instructionsRootPath: rootPath,
+          instructionsEntryFile: String(adapterConfig.instructionsEntryFile ?? "AGENTS.md"),
+          instructionsFilePath: path.join(rootPath, String(adapterConfig.instructionsEntryFile ?? "AGENTS.md")),
+        };
+        return {
+          bundle: await buildBundle(rootPath, String(nextAdapterConfig.instructionsEntryFile)),
+          file: {
+            path: relativePath,
+            size: Buffer.byteLength(content),
+            language: "markdown",
+            markdown: relativePath.endsWith(".md"),
+            isEntryFile: relativePath === nextAdapterConfig.instructionsEntryFile,
+            editable: true,
+            deprecated: false,
+            virtual: false,
+            content,
+          },
+          adapterConfig: nextAdapterConfig,
+        };
+      },
     );
     mockLogActivity.mockResolvedValue(undefined);
     mockAccessService.canUser.mockResolvedValue(true);
@@ -209,6 +338,12 @@ describe("agent skill routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([]);
     mockAccessService.ensureMembership.mockResolvedValue(undefined);
     mockAccessService.setPrincipalPermission.mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await fs.rm(testPaperclipHome, { recursive: true, force: true });
+    delete process.env.PAPERCLIP_HOME;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
   });
 
   it("skips runtime materialization when listing Claude skills", async () => {
@@ -327,23 +462,29 @@ describe("agent skill routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "11111111-1111-4111-8111-111111111111",
+        id: expect.any(String),
         adapterType: "claude_local",
       }),
-      { "AGENTS.md": "You are QA." },
+      expect.objectContaining({
+        "AGENTS.md": "You are QA.",
+        "HEARTBEAT.md": expect.stringContaining("Agent Heartbeat Checklist"),
+        "SOUL.md": expect.stringContaining("Agent Persona"),
+        "TOOLS.md": expect.stringContaining("# TOOLS.md"),
+      }),
       { entryFile: "AGENTS.md", replaceExisting: false },
     );
-    expect(mockAgentService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      "company-1",
       expect.objectContaining({
+        id: expect.any(String),
         adapterConfig: expect.objectContaining({
           instructionsBundleMode: "managed",
           instructionsEntryFile: "AGENTS.md",
-          instructionsFilePath: "/tmp/11111111-1111-4111-8111-111111111111/instructions/AGENTS.md",
+          instructionsFilePath: expect.stringMatching(/instructions\/AGENTS\.md$/),
         }),
       }),
     );
-    expect(mockAgentService.update.mock.calls.at(-1)?.[1]).not.toMatchObject({
+    expect(mockAgentService.create.mock.calls.at(-1)?.[1]).not.toMatchObject({
       adapterConfig: expect.objectContaining({
         promptTemplate: expect.anything(),
       }),
@@ -363,7 +504,7 @@ describe("agent skill routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "11111111-1111-4111-8111-111111111111",
+        id: expect.any(String),
         role: "ceo",
         adapterType: "claude_local",
       }),
@@ -390,15 +531,72 @@ describe("agent skill routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "11111111-1111-4111-8111-111111111111",
+        id: expect.any(String),
         role: "engineer",
         adapterType: "claude_local",
       }),
       expect.objectContaining({
         "AGENTS.md": expect.stringContaining("Keep the work moving until it's done."),
+        "HEARTBEAT.md": expect.stringContaining("Agent Heartbeat Checklist"),
+        "SOUL.md": expect.stringContaining("Agent Persona"),
+        "TOOLS.md": expect.stringContaining("# TOOLS.md"),
       }),
       { entryFile: "AGENTS.md", replaceExisting: false },
     );
+  });
+
+  it("creates agent-home bootstrap links for validated local agents", async () => {
+    const res = await request(createApp())
+      .post("/api/companies/company-1/agents")
+      .send({
+        name: "Engineer",
+        role: "engineer",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const agentId = String(res.body.id);
+    const workspaceRoot = path.join(
+      testPaperclipHome,
+      "instances",
+      "test",
+      "workspaces",
+      agentId,
+    );
+    for (const fileName of ["AGENTS.md", "HEARTBEAT.md", "SOUL.md", "TOOLS.md"]) {
+      const targetPath = path.join(workspaceRoot, fileName);
+      const stat = await fs.lstat(targetPath);
+      expect(stat.isSymbolicLink()).toBe(true);
+    }
+  });
+
+  it("fails direct agent creation when bootstrap environment checks block execution", async () => {
+    mockAdapter.testEnvironment.mockResolvedValueOnce({
+      adapterType: "claude_local",
+      status: "warn",
+      testedAt: new Date().toISOString(),
+      checks: [
+        {
+          code: "claude_hello_probe_failed",
+          level: "warn",
+          message: "Claude probe failed.",
+        },
+      ],
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/agents")
+      .send({
+        name: "Blocked Agent",
+        role: "engineer",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error ?? "")).toContain("claude_hello_probe_failed");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
   });
 
   it("includes canonical desired skills in hire approvals", async () => {
@@ -449,7 +647,7 @@ describe("agent skill routes", () => {
           adapterConfig: expect.objectContaining({
             instructionsBundleMode: "managed",
             instructionsEntryFile: "AGENTS.md",
-            instructionsFilePath: "/tmp/11111111-1111-4111-8111-111111111111/instructions/AGENTS.md",
+            instructionsFilePath: expect.stringMatching(/instructions\/AGENTS\.md$/),
           }),
         }),
       }),

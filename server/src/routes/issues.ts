@@ -14,6 +14,7 @@ import {
   upsertIssueDocumentSchema,
   updateIssueSchema,
 } from "@paperclipai/shared";
+import type { IssueWorkProduct } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 import { validate } from "../middleware/validate.js";
 import {
@@ -36,6 +37,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { REVIEW_DISPATCH_ORIGIN_KIND, reviewDispatchService } from "../services/review-dispatch.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -52,6 +54,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
+  const reviewDispatch = reviewDispatchService(db);
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
@@ -71,6 +74,275 @@ export function issueRoutes(db: Db, storage: StorageService) {
         else resolve();
       });
     });
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function isMergedPullRequestProduct(product: IssueWorkProduct) {
+    if (product.type !== "pull_request") return false;
+    if (product.status === "merged") return true;
+    if (product.status !== "closed") return false;
+    const metadata = isRecord(product.metadata) ? product.metadata : null;
+    return (
+      metadata?.merged === true
+      || metadata?.isMerged === true
+      || metadata?.state === "merged"
+      || metadata?.status === "merged"
+      || (typeof metadata?.mergedAt === "string" && metadata.mergedAt.trim().length > 0)
+      || (typeof metadata?.merged_at === "string" && metadata.merged_at.trim().length > 0)
+    );
+  }
+
+  function normalizeReviewText(text: string) {
+    return text
+      .normalize("NFD")
+      .replace(/\p{Diacritic}+/gu, "")
+      .toLowerCase();
+  }
+
+  function extractMarkdownSection(body: string, heading: RegExp) {
+    const match = body.match(heading);
+    if (!match || match.index === undefined) return null;
+    const start = match.index + match[0].length;
+    const rest = body.slice(start);
+    const nextHeading = rest.search(/\n###\s+/);
+    return (nextHeading >= 0 ? rest.slice(0, nextHeading) : rest).trim();
+  }
+
+  function classifyTechnicalReviewOutcome(commentBody: string | null | undefined) {
+    if (!commentBody) return null;
+
+    const normalized = normalizeReviewText(commentBody);
+    if (/retornar[\s\S]*`in_progress`/.test(normalized)) return "blocking" as const;
+    if (/pode seguir para revisao humana/.test(normalized)) return "approved" as const;
+
+    const blockingSection = extractMarkdownSection(commentBody, /^###\s+Findings bloqueantes\s*$/im);
+    if (!blockingSection) return null;
+
+    const collapsed = normalizeReviewText(blockingSection)
+      .replace(/[`*_>#\-\d.[\]()]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!collapsed) return null;
+    if (/\b(nenhum|nenhuma|nao ha|sem findings? bloqueantes?)\b/.test(collapsed)) {
+      return "approved" as const;
+    }
+    return "blocking" as const;
+  }
+
+  async function resolveTechnicalReviewOutcome(
+    reviewIssueId: string,
+    commentBody: string | null | undefined,
+  ) {
+    const directOutcome = classifyTechnicalReviewOutcome(commentBody);
+    if (directOutcome) return directOutcome;
+
+    const recentComments = await svc.listComments(reviewIssueId, {
+      order: "desc",
+      limit: 10,
+    });
+    for (const comment of recentComments) {
+      const fallbackOutcome = classifyTechnicalReviewOutcome(comment.body);
+      if (fallbackOutcome) return fallbackOutcome;
+    }
+    return null;
+  }
+
+  function isTechnicalReviewChildIssueCandidate(issue: {
+    originKind?: string | null;
+    parentId?: string | null;
+    title?: string | null;
+  }) {
+    if (!issue.parentId) return false;
+    if (issue.originKind === REVIEW_DISPATCH_ORIGIN_KIND) return true;
+    return typeof issue.title === "string" && /^revisar pr #\d+ de /i.test(issue.title.trim());
+  }
+
+  async function reconcileTechnicalReviewChildOutcome(input: {
+    reviewIssueBefore: Awaited<ReturnType<typeof svc.getById>>;
+    reviewIssueAfter: Awaited<ReturnType<typeof svc.getById>>;
+    commentBody: string | null | undefined;
+    actor: ReturnType<typeof getActorInfo>;
+  }) {
+    const reviewIssueBefore = input.reviewIssueBefore;
+    const reviewIssueAfter = input.reviewIssueAfter;
+    if (!reviewIssueBefore || !reviewIssueAfter) return null;
+    if (reviewIssueAfter.status !== "done") return null;
+    if (!isTechnicalReviewChildIssueCandidate(reviewIssueBefore)) return null;
+
+    const outcome = await resolveTechnicalReviewOutcome(
+      reviewIssueAfter.id,
+      input.commentBody,
+    );
+    if (!outcome) return null;
+
+    const parent = await svc.getById(reviewIssueBefore.parentId);
+    if (!parent || parent.status === "done" || parent.status === "cancelled") return null;
+
+    if (outcome === "approved") {
+      const transitions: string[] = [];
+      let current = parent;
+
+      if (current.status === "handoff_ready") {
+        const next = await svc.update(current.id, { status: "technical_review" });
+        if (!next) return current;
+        current = next;
+        transitions.push("handoff_ready->technical_review");
+      }
+
+      if (current.status === "technical_review") {
+        const next = await svc.update(current.id, { status: "human_review" });
+        if (!next) return current;
+        current = next;
+        transitions.push("technical_review->human_review");
+      }
+
+      if (transitions.length === 0) return current;
+
+      await routinesSvc.syncRunStatusForIssue(current.id);
+      await logActivity(db, {
+        companyId: current.companyId,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId,
+        agentId: input.actor.agentId,
+        runId: input.actor.runId,
+        action: "issue.review_outcome_reconciled",
+        entityType: "issue",
+        entityId: current.id,
+        details: {
+          outcome: "approved",
+          reviewIssueId: reviewIssueAfter.id,
+          reviewIssueIdentifier: reviewIssueAfter.identifier,
+          transitions,
+        },
+      });
+      return current;
+    }
+
+    if (!parent.assigneeAgentId) return null;
+
+    const resumedRun = await heartbeat.wakeup(parent.assigneeAgentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_status_changed",
+      payload: {
+        issueId: parent.id,
+        reviewIssueId: reviewIssueAfter.id,
+        mutation: "review_blocking_findings",
+      },
+      requestedByActorType: input.actor.actorType,
+      requestedByActorId: input.actor.actorId,
+      contextSnapshot: {
+        issueId: parent.id,
+        taskId: parent.id,
+        source: "issue.review_outcome",
+        reviewIssueId: reviewIssueAfter.id,
+        reviewOutcome: "blocking",
+      },
+    });
+    if (!resumedRun) return null;
+
+    const checkedOut = await svc.checkout(
+      parent.id,
+      parent.assigneeAgentId,
+      [parent.status],
+      resumedRun.id,
+    );
+    if (!checkedOut) return null;
+
+    await routinesSvc.syncRunStatusForIssue(checkedOut.id);
+    await logActivity(db, {
+      companyId: checkedOut.companyId,
+      actorType: input.actor.actorType,
+      actorId: input.actor.actorId,
+      agentId: input.actor.agentId,
+      runId: input.actor.runId,
+      action: "issue.review_outcome_reconciled",
+      entityType: "issue",
+      entityId: checkedOut.id,
+      details: {
+        outcome: "blocking",
+        reviewIssueId: reviewIssueAfter.id,
+        reviewIssueIdentifier: reviewIssueAfter.identifier,
+        resumedRunId: resumedRun.id,
+        transition: `${parent.status}->in_progress`,
+      },
+    });
+    return checkedOut;
+  }
+
+  async function reconcileMergedPullRequestIssue(input: {
+    issueId: string;
+    workProduct: IssueWorkProduct;
+    actor: ReturnType<typeof getActorInfo>;
+  }) {
+    const issue = await svc.getById(input.issueId);
+    if (!issue) return null;
+    if (issue.status === "done" || issue.status === "cancelled") return issue;
+
+    const transitions: string[] = [];
+    let current = issue;
+
+    if (current.status === "handoff_ready") {
+      const next = await svc.update(current.id, { status: "technical_review" });
+      if (!next) return current;
+      current = next;
+      transitions.push("handoff_ready->technical_review");
+    }
+
+    if (current.status === "technical_review") {
+      const next = await svc.update(current.id, { status: "human_review" });
+      if (!next) return current;
+      current = next;
+      transitions.push("technical_review->human_review");
+    }
+
+    if (current.status === "human_review") {
+      const next = await svc.update(current.id, { status: "done" });
+      if (!next) return current;
+      current = next;
+      transitions.push("human_review->done");
+    }
+
+    if (transitions.length === 0 || current.status !== "done") return current;
+
+    await routinesSvc.syncRunStatusForIssue(current.id);
+
+    const childIssues = await svc.list(current.companyId, { parentId: current.id });
+    const openReviewChildren = childIssues.filter((child) =>
+      isTechnicalReviewChildIssueCandidate(child)
+      && child.status !== "done"
+      && child.status !== "cancelled",
+    );
+    for (const child of openReviewChildren) {
+      await svc.update(child.id, { status: "cancelled" });
+      await routinesSvc.syncRunStatusForIssue(child.id);
+    }
+
+    await logActivity(db, {
+      companyId: current.companyId,
+      actorType: input.actor.actorType,
+      actorId: input.actor.actorId,
+      agentId: input.actor.agentId,
+      runId: input.actor.runId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: current.id,
+      details: {
+        status: "done",
+        identifier: current.identifier,
+        source: "work_product",
+        autoCompletedFromPullRequest: true,
+        workProductId: input.workProduct.id,
+        workProductStatus: input.workProduct.status,
+        transitions,
+      },
+    });
+
+    return current;
   }
 
   async function assertCanManageIssueApprovalLinks(req: Request, res: Response, companyId: string) {
@@ -398,6 +670,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
         parentId: issue.parentId,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
+        currentOwner: issue.currentOwner ?? null,
         updatedAt: issue.updatedAt,
       },
       ancestors: ancestors.map((ancestor) => ({
@@ -612,6 +885,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
       entityId: issue.id,
       details: { workProductId: product.id, type: product.type, provider: product.provider },
     });
+    if (isMergedPullRequestProduct(product)) {
+      await reconcileMergedPullRequestIssue({
+        issueId: issue.id,
+        workProduct: product,
+        actor,
+      });
+    }
     res.status(201).json(product);
   });
 
@@ -640,6 +920,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
       entityId: existing.issueId,
       details: { workProductId: product.id, changedKeys: Object.keys(req.body).sort() },
     });
+    if (isMergedPullRequestProduct(product)) {
+      await reconcileMergedPullRequestIssue({
+        issueId: existing.issueId,
+        workProduct: product,
+        actor,
+      });
+    }
     res.json(product);
   });
 
@@ -948,6 +1235,107 @@ export function issueRoutes(db: Db, storage: StorageService) {
         },
       });
 
+    }
+
+    try {
+      await reconcileTechnicalReviewChildOutcome({
+        reviewIssueBefore: existing,
+        reviewIssueAfter: issue,
+        commentBody,
+        actor,
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "failed to reconcile technical review outcome");
+    }
+
+    if (issue.status === "handoff_ready") {
+      try {
+        const dispatch = await reviewDispatch.dispatchForIssue({
+          issueId: issue.id,
+          commentId: comment?.id ?? null,
+        });
+
+        if (dispatch.kind === "created") {
+          await logActivity(db, {
+            companyId: dispatch.reviewIssue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.created",
+            entityType: "issue",
+            entityId: dispatch.reviewIssue.id,
+            details: {
+              title: dispatch.reviewIssue.title,
+              identifier: dispatch.reviewIssue.identifier,
+              parentId: issue.id,
+              originKind: dispatch.reviewIssue.originKind,
+              originId: dispatch.reviewIssue.originId,
+            },
+          });
+
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.review_dispatch_created",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              reviewIssueId: dispatch.reviewIssue.id,
+              reviewIssueIdentifier: dispatch.reviewIssue.identifier,
+              prUrl: dispatch.artifact.pullRequest.url,
+              prNumber: dispatch.artifact.pullRequest.prNumber,
+              diffIdentity: dispatch.artifact.diffIdentity,
+            },
+          });
+
+          void queueIssueAssignmentWakeup({
+            heartbeat,
+            issue: dispatch.reviewIssue,
+            reason: "issue_assigned",
+            mutation: "review_dispatch",
+            contextSource: "issue.review_dispatch",
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+          });
+        } else if (dispatch.kind === "reused" || dispatch.kind === "already_reviewed") {
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.review_dispatch_reused",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              outcome: dispatch.kind,
+              reviewIssueId: dispatch.reviewIssue.id,
+              reviewIssueIdentifier: dispatch.reviewIssue.identifier,
+              prUrl: dispatch.artifact.pullRequest.url,
+              prNumber: dispatch.artifact.pullRequest.prNumber,
+              diffIdentity: dispatch.artifact.diffIdentity,
+            },
+          });
+
+          if (dispatch.kind === "reused") {
+            void queueIssueAssignmentWakeup({
+              heartbeat,
+              issue: dispatch.reviewIssue,
+              reason: "issue_status_changed",
+              mutation: "review_dispatch_reuse",
+              contextSource: "issue.review_dispatch",
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, issueId: issue.id }, "failed to dispatch technical review");
+      }
     }
 
     const assigneeChanged = assigneeWillChange;
@@ -1273,8 +1661,9 @@ export function issueRoutes(db: Db, storage: StorageService) {
         return;
       }
 
-      let runToInterrupt = currentIssue.executionRunId
-        ? await heartbeat.getRun(currentIssue.executionRunId)
+      type HeartbeatRunRecord = NonNullable<Awaited<ReturnType<typeof heartbeat.getRun>>>;
+      let runToInterrupt: HeartbeatRunRecord | null = currentIssue.executionRunId
+        ? (await heartbeat.getRun(currentIssue.executionRunId)) as HeartbeatRunRecord | null
         : null;
 
       if (
@@ -1290,7 +1679,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
             ? ((activeRun.contextSnapshot as Record<string, unknown>).issueId as string)
             : null;
         if (activeRun && activeRun.status === "running" && activeIssueId === currentIssue.id) {
-          runToInterrupt = activeRun;
+          runToInterrupt = activeRun as HeartbeatRunRecord;
         }
       }
 

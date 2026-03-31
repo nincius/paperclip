@@ -12,8 +12,10 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
+import { inboxIssueStatuses } from "../lib/issue-status";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { IssueCurrentOwnerBadge } from "../components/IssueCurrentOwnerBadge";
 import { IssueRow } from "../components/IssueRow";
 
 import { StatusIcon } from "../components/StatusIcon";
@@ -444,7 +446,7 @@ export function Inbox() {
     queryFn: () =>
       issuesApi.list(selectedCompanyId!, {
         touchedByUserId: "me",
-        status: "backlog,todo,in_progress,in_review,blocked,done",
+        status: inboxIssueStatuses.join(","),
       }),
     enabled: !!selectedCompanyId,
   });
@@ -885,6 +887,7 @@ export function Inbox() {
                         ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
                         : `updated ${timeAgo(issue.updatedAt)}`
                     }
+                    desktopTrailing={<IssueCurrentOwnerBadge issue={issue} agentName={agentName} className="max-w-[180px]" />}
                     unreadState={isUnread ? "visible" : isFading ? "fading" : "hidden"}
                     onMarkRead={() => markReadMutation.mutate(issue.id)}
                     trailingMeta={

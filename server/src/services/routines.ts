@@ -12,6 +12,7 @@ import {
   routines,
   routineTriggers,
 } from "@paperclipai/db";
+import { ISSUE_OPEN_STATUSES } from "@paperclipai/shared";
 import type {
   CreateRoutine,
   CreateRoutineTrigger,
@@ -34,7 +35,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 
-const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
+const OPEN_ISSUE_STATUSES = [...ISSUE_OPEN_STATUSES];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;

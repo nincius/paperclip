@@ -58,7 +58,7 @@ export const issuesApi = {
   checkout: (id: string, agentId: string) =>
     api.post<Issue>(`/issues/${id}/checkout`, {
       agentId,
-      expectedStatuses: ["todo", "backlog", "blocked"],
+      expectedStatuses: ["todo", "backlog", "blocked", "changes_requested"],
     }),
   release: (id: string) => api.post<Issue>(`/issues/${id}/release`, {}),
   listComments: (id: string) => api.get<IssueComment[]>(`/issues/${id}/comments`),

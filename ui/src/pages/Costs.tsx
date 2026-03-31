@@ -9,7 +9,7 @@ import type {
   FinanceEvent,
   QuotaWindow,
 } from "@paperclipai/shared";
-import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, Gauge, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
 import { costsApi } from "../api/costs";
 import { BillerSpendCard } from "../components/BillerSpendCard";
@@ -518,6 +518,23 @@ export function Costs() {
       (sum, row) => sum + row.inputTokens + row.cachedInputTokens + row.outputTokens,
       0,
     );
+  const subscriptionRunTotal =
+    (spendData?.byAgent ?? []).reduce((sum, row) => sum + row.subscriptionRunCount, 0);
+  const subscriptionTokenTotal =
+    (spendData?.byAgent ?? []).reduce(
+      (sum, row) => sum + row.subscriptionInputTokens + row.subscriptionCachedInputTokens + row.subscriptionOutputTokens,
+      0,
+    );
+  const meteredRunTotal =
+    (spendData?.byAgent ?? []).reduce((sum, row) => sum + row.apiRunCount, 0);
+  const billedSpendCents = spendData?.summary.spendCents ?? 0;
+  const hasSubscriptionUsage = subscriptionRunTotal > 0 || subscriptionTokenTotal > 0;
+  const spendSubtitle =
+    billedSpendCents > 0
+      ? `${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`
+      : hasSubscriptionUsage
+        ? `${subscriptionRunTotal} subscription runs · ${formatTokens(subscriptionTokenTotal)} tokens covered by plan`
+        : `${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`;
 
   const topFinanceEvents = (financeData?.events ?? []) as FinanceEvent[];
   const budgetPolicies = budgetData?.policies ?? [];
@@ -543,7 +560,7 @@ export function Costs() {
             <div>
                 <h1 className="text-3xl font-semibold tracking-tight">Costs</h1>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Inference spend, platform fees, credits, and live quota windows.
+                  Billed inference spend, subscription-covered usage, platform fees, credits, and live quota windows.
                 </p>
             </div>
 
@@ -579,12 +596,22 @@ export function Costs() {
             </div>
           ) : null}
 
-          <div className="grid gap-3 lg:grid-cols-4">
+          <div className="grid gap-3 lg:grid-cols-5">
             <MetricTile
-              label="Inference spend"
-              value={formatCents(spendData?.summary.spendCents ?? 0)}
-              subtitle={`${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`}
+              label="Billed spend"
+              value={formatCents(billedSpendCents)}
+              subtitle={spendSubtitle}
               icon={DollarSign}
+            />
+            <MetricTile
+              label="Subscription usage"
+              value={hasSubscriptionUsage ? String(subscriptionRunTotal) : "0"}
+              subtitle={
+                hasSubscriptionUsage
+                  ? `${formatTokens(subscriptionTokenTotal)} tokens on subscription-covered runs`
+                  : "No subscription-covered runs in range"
+              }
+              icon={Coins}
             />
             <MetricTile
               label="Budget"
@@ -600,7 +627,7 @@ export function Costs() {
                     ? `${formatCents(spendData.summary.spendCents)} of ${formatCents(spendData.summary.budgetCents)}`
                     : "No monthly cap configured"
               }
-              icon={Coins}
+              icon={Gauge}
             />
             <MetricTile
               label="Finance net"
@@ -654,24 +681,57 @@ export function Costs() {
                 </div>
               ) : null}
 
+              {billedSpendCents === 0 && hasSubscriptionUsage ? (
+                <Card>
+                  <CardHeader className="px-5 pt-5 pb-2">
+                    <CardTitle className="text-base">Subscription-covered usage</CardTitle>
+                    <CardDescription>
+                      The selected range has inference usage, but it is currently billed as subscription-included rather than metered API spend.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-3 px-5 pb-5 pt-2 sm:grid-cols-3">
+                    <MetricTile
+                      label="Covered runs"
+                      value={String(subscriptionRunTotal)}
+                      subtitle={`${meteredRunTotal} metered run${meteredRunTotal === 1 ? "" : "s"} in the same range`}
+                      icon={Coins}
+                    />
+                    <MetricTile
+                      label="Covered tokens"
+                      value={formatTokens(subscriptionTokenTotal)}
+                      subtitle="Input, cached input, and output usage tracked from heartbeat runs"
+                      icon={DollarSign}
+                    />
+                    <MetricTile
+                      label="Why spend is zero"
+                      value="Expected"
+                      subtitle="Budgeted dollars stay at $0.00 until a metered biller or explicit provider cost is reported"
+                      icon={ReceiptText}
+                    />
+                  </CardContent>
+                </Card>
+              ) : null}
+
               <div className="grid gap-4 xl:grid-cols-[1.3fr,1fr]">
                 <Card>
                   <CardHeader className="px-5 pt-5 pb-2">
                     <CardTitle className="text-base">Inference ledger</CardTitle>
                     <CardDescription>
-                      Request-scoped inference spend for the selected period.
+                      Request-scoped inference ledger for the selected period, including subscription-covered usage when present.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4 px-5 pb-5 pt-2">
                     <div className="flex flex-wrap items-end justify-between gap-3">
                       <div>
                         <div className="text-3xl font-semibold tabular-nums">
-                          {formatCents(spendData?.summary.spendCents ?? 0)}
+                          {formatCents(billedSpendCents)}
                         </div>
                         <div className="mt-1 text-sm text-muted-foreground">
                           {spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
                             ? `Budget ${formatCents(spendData.summary.budgetCents)}`
-                            : "Unlimited budget"}
+                            : hasSubscriptionUsage
+                              ? "Usage is currently covered by subscription billing"
+                              : "Unlimited budget"}
                         </div>
                       </div>
                       <div className="border border-border px-4 py-3 text-right">
@@ -720,8 +780,10 @@ export function Costs() {
                     <CardDescription>What each agent consumed in the selected period.</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-2 px-5 pb-5 pt-2">
-                    {(spendData?.byAgent.length ?? 0) === 0 ? (
-                      <p className="text-sm text-muted-foreground">No cost events yet.</p>
+                      {(spendData?.byAgent.length ?? 0) === 0 ? (
+                      <p className="text-sm text-muted-foreground">
+                        No inference ledger events yet.
+                      </p>
                     ) : (
                       spendData?.byAgent.map((row) => {
                         const modelRows = agentModelRows.get(row.agentId) ?? [];

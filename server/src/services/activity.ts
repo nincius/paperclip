@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, heartbeatRuns, issues } from "@paperclipai/db";
+import { loadHeartbeatRunOperationalEffects } from "./heartbeat-run-effect.js";
 
 export interface ActivityFilters {
   companyId: string;
@@ -60,8 +61,8 @@ export function activityService(db: Db) {
         )
         .orderBy(desc(activityLog.createdAt)),
 
-    runsForIssue: (companyId: string, issueId: string) =>
-      db
+    runsForIssue: async (companyId: string, issueId: string) => {
+      const rows = await db
         .select({
           runId: heartbeatRuns.id,
           status: heartbeatRuns.status,
@@ -90,7 +91,14 @@ export function activityService(db: Db) {
             ),
           ),
         )
-        .orderBy(desc(heartbeatRuns.createdAt)),
+        .orderBy(desc(heartbeatRuns.createdAt));
+
+      const effects = await loadHeartbeatRunOperationalEffects(db, rows.map((row) => row.runId));
+      return rows.map((row) => ({
+        ...row,
+        operationalEffect: effects.get(row.runId) ?? null,
+      }));
+    },
 
     issuesForRun: async (runId: string) => {
       const run = await db

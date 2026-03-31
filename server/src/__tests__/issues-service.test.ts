@@ -281,4 +281,303 @@ describe("issueService.list participantAgentId", () => {
 
     expect(result.map((issue) => issue.id)).toEqual([matchedIssueId]);
   });
+
+  it("rejects creating an in_progress issue without checkout", async () => {
+    const companyId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await expect(
+      svc.create(companyId, {
+        title: "Bad direct in_progress create",
+        status: "in_progress",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Use POST /api/issues/:id/checkout to move an issue into in_progress.");
+  });
+
+  it("rejects moving an issue into in_progress without checkout", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Bad direct in_progress update",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(
+      svc.update(issueId, { status: "in_progress" }),
+    ).rejects.toThrow("Use POST /api/issues/:id/checkout to move an issue into in_progress.");
+  });
+
+  it("allows moving a claimed issue into in_progress", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Worker",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Claimed issue",
+      status: "claimed",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const updated = await svc.update(issueId, { status: "in_progress" });
+    expect(updated?.status).toBe("in_progress");
+    expect(updated?.startedAt).toBeInstanceOf(Date);
+  });
+
+  it("rejects invalid review-state transitions", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Bad review transition",
+      status: "technical_review",
+      priority: "medium",
+    });
+
+    await expect(
+      svc.update(issueId, { status: "done" }),
+    ).rejects.toThrow("Invalid issue status transition: technical_review -> done");
+  });
+
+  it("rejects legacy in_review with an actionable migration hint", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Legacy review alias",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    await expect(
+      svc.update(issueId, { status: "in_review" }),
+    ).rejects.toThrow(
+      "Unknown issue status: in_review. Legacy in_review was replaced by handoff_ready, technical_review, and human_review. Use handoff_ready to dispatch technical review.",
+    );
+  });
+
+  it("rejects direct human_review moves with the staged review hint", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Worker",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Direct human review jump",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    await expect(
+      svc.update(issueId, { status: "human_review" }),
+    ).rejects.toThrow(
+      "Invalid issue status transition: in_progress -> human_review. Move the issue into handoff_ready first; Paperclip advances technical_review -> human_review after technical review is complete.",
+    );
+  });
+
+  it("allows reopening a cancelled issue back to todo", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Closed alert",
+      status: "cancelled",
+      priority: "medium",
+      cancelledAt: new Date("2026-03-29T12:00:00.000Z"),
+    });
+
+    const reopened = await svc.update(issueId, { status: "todo" });
+
+    expect(reopened?.status).toBe("todo");
+    expect(reopened?.cancelledAt).toBeNull();
+    expect(reopened?.completedAt).toBeNull();
+  });
+
+  it("surfaces the technical reviewer as current owner for handoff_ready issues", async () => {
+    const companyId = randomUUID();
+    const sourceAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const reviewIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: sourceAgentId,
+        companyId,
+        name: "Executor",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: reviewerAgentId,
+        companyId,
+        name: "Revisor PR",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: sourceIssueId,
+        companyId,
+        title: "Source issue",
+        status: "handoff_ready",
+        priority: "medium",
+        assigneeAgentId: sourceAgentId,
+      },
+      {
+        id: reviewIssueId,
+        companyId,
+        parentId: sourceIssueId,
+        title: "Review issue",
+        status: "technical_review",
+        priority: "medium",
+        assigneeAgentId: reviewerAgentId,
+        originKind: "technical_review_dispatch",
+      },
+    ]);
+
+    const issue = await svc.getById(sourceIssueId);
+
+    expect(issue?.currentOwner).toEqual({
+      actorType: "agent",
+      role: "technical_reviewer",
+      agentId: reviewerAgentId,
+      userId: null,
+      label: "Technical reviewer",
+    });
+  });
+
+  it("surfaces board ownership for human_review issues without an explicit human assignee", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Awaiting human review",
+      status: "human_review",
+      priority: "medium",
+    });
+
+    const issue = await svc.getById(issueId);
+
+    expect(issue?.currentOwner).toEqual({
+      actorType: "board",
+      role: "human_reviewer",
+      agentId: null,
+      userId: null,
+      label: "Board",
+    });
+  });
 });

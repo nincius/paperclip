@@ -1,4 +1,5 @@
 import type { HeartbeatRun } from "@paperclipai/shared";
+import { issueBoardStatuses, issueStatusLabel } from "../lib/issue-status";
 
 /* ---- Utilities ---- */
 
@@ -158,23 +159,17 @@ export function PriorityChart({ issues }: { issues: { priority: string; createdA
 }
 
 const statusColors: Record<string, string> = {
+  backlog: "#64748b",
   todo: "#3b82f6",
-  in_progress: "#8b5cf6",
-  in_review: "#a855f7",
+  claimed: "#0891b2",
+  in_progress: "#d97706",
+  handoff_ready: "#4f46e5",
+  technical_review: "#a855f7",
+  changes_requested: "#ea580c",
+  human_review: "#059669",
   done: "#10b981",
   blocked: "#ef4444",
   cancelled: "#6b7280",
-  backlog: "#64748b",
-};
-
-const statusLabels: Record<string, string> = {
-  todo: "To Do",
-  in_progress: "In Progress",
-  in_review: "In Review",
-  done: "Done",
-  blocked: "Blocked",
-  cancelled: "Cancelled",
-  backlog: "Backlog",
 };
 
 export function IssueStatusChart({ issues }: { issues: { status: string; createdAt: Date }[] }) {
@@ -190,7 +185,7 @@ export function IssueStatusChart({ issues }: { issues: { status: string; created
     allStatuses.add(issue.status);
   }
 
-  const statusOrder = ["todo", "in_progress", "in_review", "done", "blocked", "cancelled", "backlog"].filter(s => allStatuses.has(s));
+  const statusOrder = issueBoardStatuses.filter((status) => allStatuses.has(status));
   const maxValue = Math.max(...Array.from(grouped.values()).map(v => Object.values(v).reduce((a, b) => a + b, 0)), 1);
   const hasData = allStatuses.size > 0;
 
@@ -219,37 +214,56 @@ export function IssueStatusChart({ issues }: { issues: { status: string; created
         })}
       </div>
       <DateLabels days={days} />
-      <ChartLegend items={statusOrder.map(s => ({ color: statusColors[s] ?? "#6b7280", label: statusLabels[s] ?? s }))} />
+      <ChartLegend items={statusOrder.map((status) => ({ color: statusColors[status] ?? "#6b7280", label: issueStatusLabel(status) }))} />
     </div>
   );
 }
 
-export function SuccessRateChart({ runs }: { runs: HeartbeatRun[] }) {
+export function OperationalEffectChart({ runs }: { runs: HeartbeatRun[] }) {
   const days = getLast14Days();
-  const grouped = new Map<string, { succeeded: number; total: number }>();
-  for (const day of days) grouped.set(day, { succeeded: 0, total: 0 });
+  const grouped = new Map<string, { finished: number; effect: number }>();
+  for (const day of days) grouped.set(day, { finished: 0, effect: 0 });
   for (const run of runs) {
     const day = new Date(run.createdAt).toISOString().slice(0, 10);
     const entry = grouped.get(day);
     if (!entry) continue;
-    entry.total++;
-    if (run.status === "succeeded") entry.succeeded++;
+    const isFinished = run.status !== "running" && run.status !== "queued";
+    if (isFinished) entry.finished++;
+    if (isFinished && run.operationalEffect?.producedEffect) entry.effect++;
   }
 
-  const hasData = Array.from(grouped.values()).some(v => v.total > 0);
+  const hasData = Array.from(grouped.values()).some(v => v.finished > 0 || v.effect > 0);
   if (!hasData) return <p className="text-xs text-muted-foreground">No runs yet</p>;
+  const maxValue = Math.max(...Array.from(grouped.values()).map(v => Math.max(v.finished, v.effect)), 1);
 
   return (
     <div>
       <div className="flex items-end gap-[3px] h-20">
         {days.map(day => {
           const entry = grouped.get(day)!;
-          const rate = entry.total > 0 ? entry.succeeded / entry.total : 0;
-          const color = entry.total === 0 ? undefined : rate >= 0.8 ? "#10b981" : rate >= 0.5 ? "#eab308" : "#ef4444";
+          const finishedHeightPct = (entry.finished / maxValue) * 100;
+          const effectHeightPct = (entry.effect / maxValue) * 100;
           return (
-            <div key={day} className="flex-1 h-full flex flex-col justify-end" title={`${day}: ${entry.total > 0 ? Math.round(rate * 100) : 0}% (${entry.succeeded}/${entry.total})`}>
-              {entry.total > 0 ? (
-                <div style={{ height: `${rate * 100}%`, minHeight: 2, backgroundColor: color }} />
+            <div
+              key={day}
+              className="flex-1 h-full flex flex-col justify-end"
+              title={`${day}: ${entry.effect} effect / ${entry.finished} finished`}
+            >
+              {entry.finished > 0 || entry.effect > 0 ? (
+                <div className="relative" style={{ height: `${Math.max(finishedHeightPct, effectHeightPct)}%`, minHeight: 2 }}>
+                  {entry.finished > 0 && (
+                    <div
+                      className="absolute inset-x-0 bottom-0 rounded-sm bg-sky-500/35"
+                      style={{ height: `${finishedHeightPct}%`, minHeight: 2 }}
+                    />
+                  )}
+                  {entry.effect > 0 && (
+                    <div
+                      className="absolute inset-x-0 bottom-0 rounded-sm bg-emerald-500"
+                      style={{ height: `${effectHeightPct}%`, minHeight: 2 }}
+                    />
+                  )}
+                </div>
               ) : (
                 <div className="bg-muted/30 rounded-sm" style={{ height: 2 }} />
               )}
@@ -258,6 +272,10 @@ export function SuccessRateChart({ runs }: { runs: HeartbeatRun[] }) {
         })}
       </div>
       <DateLabels days={days} />
+      <ChartLegend items={[
+        { color: "rgba(14,165,233,0.5)", label: "Finished" },
+        { color: "#10b981", label: "Produced effect" },
+      ]} />
     </div>
   );
 }

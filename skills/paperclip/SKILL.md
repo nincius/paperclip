@@ -35,9 +35,9 @@ Follow these steps every time you wake up:
   - add a markdown comment explaining why it remains open and what happens next.
     Always include links to the approval and issue in that comment.
 
-**Step 3 — Get assignments.** Prefer `GET /api/agents/me/inbox-lite` for the normal heartbeat inbox. It returns the compact assignment list you need for prioritization. Fall back to `GET /api/companies/{companyId}/issues?assigneeAgentId={your-agent-id}&status=todo,in_progress,blocked` only when you need the full issue objects.
+**Step 3 — Get assignments.** Prefer `GET /api/agents/me/inbox-lite` for the normal heartbeat inbox. It returns the compact assignment list you need for prioritization. Fall back to `GET /api/companies/{companyId}/issues?assigneeAgentId={your-agent-id}&status=todo,in_progress,changes_requested,blocked` only when you need the full issue objects.
 
-**Step 4 — Pick work (with mention exception).** Work on `in_progress` first, then `todo`. Skip `blocked` unless you can unblock it.
+**Step 4 — Pick work (with mention exception).** Work on `in_progress` first, then `todo` / `changes_requested`. Skip `blocked` unless you can unblock it. Treat `handoff_ready`, `technical_review`, and `human_review` as review-lane states, not normal executor checkout targets, unless the task is explicitly yours to review.
 **Blocked-task dedup:** Before working on a `blocked` task, fetch its comment thread. If your most recent comment was a blocked-status update AND no new comments from other agents or users have been posted since, skip the task entirely — do not checkout, do not post another comment. Exit the heartbeat (or move to the next task) instead. Only re-engage with a blocked task when new context exists (a new comment, status change, or event-based wake like `PAPERCLIP_WAKE_COMMENT_ID`).
 If `PAPERCLIP_TASK_ID` is set and that task is assigned to you, prioritize it first for this heartbeat.
 If this run was triggered by a comment mention (`PAPERCLIP_WAKE_COMMENT_ID` set; typically `PAPERCLIP_WAKE_REASON=issue_comment_mentioned`), you MUST read that comment thread first, even if the task is not currently assigned to you.
@@ -46,12 +46,12 @@ If the comment asks for input/review but not ownership, respond in comments if u
 If the comment does not direct you to take ownership, do not self-assign.
 If nothing is assigned and there is no valid mention-based ownership handoff, exit the heartbeat.
 
-**Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
+**Step 5 — Checkout.** You MUST checkout before doing execution/rework that moves the issue into `in_progress`. Do not checkout review-lane tasks (`handoff_ready`, `technical_review`, `human_review`) just to leave context or a PR note. Include the run ID header:
 
 ```
 POST /api/issues/{issueId}/checkout
 Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
-{ "agentId": "{your-agent-id}", "expectedStatuses": ["todo", "backlog", "blocked"] }
+{ "agentId": "{your-agent-id}", "expectedStatuses": ["todo", "backlog", "blocked", "changes_requested"] }
 ```
 
 If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.**
@@ -83,7 +83,9 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "blocked", "comment": "What is blocked, why, and who needs to unblock it." }
 ```
 
-Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
+Status values: `backlog`, `todo`, `claimed`, `in_progress`, `handoff_ready`, `technical_review`, `changes_requested`, `human_review`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
+
+Legacy `in_review` is not a valid target status anymore. Use `handoff_ready` for executor-to-review handoff, and only move to `human_review` from `technical_review`.
 
 **Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. Set `billingCode` for cross-team work.
 
@@ -143,7 +145,7 @@ If you are asked to install a skill for the company or an agent you MUST read:
 - **Never retry a 409.** The task belongs to someone else.
 - **Never look for unassigned work.**
 - **Self-assign only for explicit @-mention handoff.** This requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch). Otherwise, no assignments = exit.
-- **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign the issue to that user with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`, and typically set status to `in_review` instead of `done`.
+- **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign the issue to that user with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`. Use `human_review` only when the issue is already in the review lane or can legally move there; otherwise leave the status as-is and record the intended handoff in the comment instead of forcing an invalid jump.
   Resolve requesting user id from the triggering comment thread (`authorUserId`) when available; otherwise use the issue's `createdByUserId` if it matches the requester context.
 - **Always comment** on `in_progress` work before exiting a heartbeat — **except** for blocked tasks with no new context (see blocked-task dedup in Step 4).
 - **Always set `parentId`** on subtasks (and `goalId` unless you're CEO/manager creating top-level work).

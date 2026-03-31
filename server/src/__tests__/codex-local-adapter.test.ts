@@ -8,7 +8,7 @@ describe("codex_local parser", () => {
     const stdout = [
       JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hello" } }),
-      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 4 } }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 4 }, total_cost_usd: 0.0042 }),
       JSON.stringify({ type: "turn.failed", error: { message: "model access denied" } }),
     ].join("\n");
 
@@ -20,6 +20,7 @@ describe("codex_local parser", () => {
       cachedInputTokens: 2,
       outputTokens: 4,
     });
+    expect(parsed.costUsd).toBeCloseTo(0.0042, 6);
     expect(parsed.errorMessage).toBe("model access denied");
   });
 });
@@ -28,6 +29,13 @@ describe("codex_local stale session detection", () => {
   it("treats missing rollout path as an unknown session error", () => {
     const stderr =
       "2026-02-19T19:58:53.281939Z ERROR codex_core::rollout::list: state db missing rollout path for thread 019c775d-967c-7ef1-acc7-e396dc2c87cc";
+
+    expect(isCodexUnknownSessionError("", stderr)).toBe(true);
+  });
+
+  it("treats no rollout found for thread id as an unknown session error", () => {
+    const stderr =
+      "Error: thread/resume: thread/resume failed: no rollout found for thread id 919c11f4-85a1-4ea0-a75a-befb69fe7923";
 
     expect(isCodexUnknownSessionError("", stderr)).toBe(true);
   });

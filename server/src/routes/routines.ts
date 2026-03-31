@@ -9,7 +9,7 @@ import {
   updateRoutineTriggerSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { accessService, logActivity, routineService } from "../services/index.js";
+import { accessService, agentService, logActivity, routineService } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 
@@ -17,6 +17,34 @@ export function routineRoutes(db: Db) {
   const router = Router();
   const svc = routineService(db);
   const access = accessService(db);
+  const agents = agentService(db);
+
+  function canCreateAgentsLegacy(agent: { role: string; permissions: Record<string, unknown> | null | undefined }) {
+    if (agent.role === "ceo") return true;
+    if (!agent.permissions || typeof agent.permissions !== "object") return false;
+    return Boolean((agent.permissions as Record<string, unknown>).canCreateAgents);
+  }
+
+  async function assertAgentCanManageRoutineAssignee(req: Request, companyId: string, assigneeAgentId?: string | null) {
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type === "board") return;
+    if (req.actor.type !== "agent" || !req.actor.agentId) throw unauthorized();
+    if (!assigneeAgentId || assigneeAgentId === req.actor.agentId) return;
+
+    const [allowedByGrant, actorAgent] = await Promise.all([
+      access.hasPermission(companyId, "agent", req.actor.agentId, "tasks:assign"),
+      agents.getById(req.actor.agentId),
+    ]);
+    const allowedByRole = Boolean(actorAgent && actorAgent.companyId === companyId && canCreateAgentsLegacy(actorAgent));
+    if (!allowedByGrant && !allowedByRole) {
+      throw forbidden("Missing policy to manage routines for other agents");
+    }
+
+    const chainOfCommand = await agents.getChainOfCommand(assigneeAgentId);
+    if (!chainOfCommand.some((manager) => manager.id === req.actor.agentId)) {
+      throw forbidden("Agents can only manage routines assigned to themselves or their reports");
+    }
+  }
 
   async function assertBoardCanAssignTasks(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
@@ -29,23 +57,14 @@ export function routineRoutes(db: Db) {
   }
 
   function assertCanManageCompanyRoutine(req: Request, companyId: string, assigneeAgentId?: string | null) {
-    assertCompanyAccess(req, companyId);
-    if (req.actor.type === "board") return;
-    if (req.actor.type !== "agent" || !req.actor.agentId) throw unauthorized();
-    if (assigneeAgentId && assigneeAgentId !== req.actor.agentId) {
-      throw forbidden("Agents can only manage routines assigned to themselves");
-    }
+    return assertAgentCanManageRoutineAssignee(req, companyId, assigneeAgentId);
   }
 
   async function assertCanManageExistingRoutine(req: Request, routineId: string) {
     const routine = await svc.get(routineId);
     if (!routine) return null;
     assertCompanyAccess(req, routine.companyId);
-    if (req.actor.type === "board") return routine;
-    if (req.actor.type !== "agent" || !req.actor.agentId) throw unauthorized();
-    if (routine.assigneeAgentId !== req.actor.agentId) {
-      throw forbidden("Agents can only manage routines assigned to themselves");
-    }
+    await assertAgentCanManageRoutineAssignee(req, routine.companyId, routine.assigneeAgentId);
     return routine;
   }
 
@@ -59,7 +78,7 @@ export function routineRoutes(db: Db) {
   router.post("/companies/:companyId/routines", validate(createRoutineSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertBoardCanAssignTasks(req, companyId);
-    assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
+    await assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
     const created = await svc.create(companyId, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -108,8 +127,12 @@ export function routineRoutes(db: Db) {
     if (statusWillActivate) {
       await assertBoardCanAssignTasks(req, routine.companyId);
     }
-    if (req.actor.type === "agent" && req.body.assigneeAgentId && req.body.assigneeAgentId !== req.actor.agentId) {
-      throw forbidden("Agents can only assign routines to themselves");
+    if (
+      req.actor.type === "agent" &&
+      req.body.assigneeAgentId !== undefined &&
+      req.body.assigneeAgentId !== routine.assigneeAgentId
+    ) {
+      await assertAgentCanManageRoutineAssignee(req, routine.companyId, req.body.assigneeAgentId);
     }
     const updated = await svc.update(routine.id, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,

@@ -83,7 +83,35 @@ export const issues = pgTable(
           and ${table.originId} is not null
           and ${table.hiddenAt} is null
           and ${table.executionRunId} is not null
-          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+          and ${table.status} in (
+            'backlog',
+            'todo',
+            'claimed',
+            'in_progress',
+            'handoff_ready',
+            'technical_review',
+            'changes_requested',
+            'human_review',
+            'blocked'
+          )`,
+      ),
+    openAgentHealthAlertIdx: uniqueIndex("issues_open_agent_health_alert_uq")
+      .on(table.companyId, table.originKind, table.originId)
+      .where(
+        sql`${table.originKind} = 'agent_health_alert'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is null
+          and ${table.status} in (
+            'backlog',
+            'todo',
+            'claimed',
+            'in_progress',
+            'handoff_ready',
+            'technical_review',
+            'changes_requested',
+            'human_review',
+            'blocked'
+          )`,
       ),
   }),
 );

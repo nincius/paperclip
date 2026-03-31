@@ -12,7 +12,7 @@ import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
-import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
+import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, OperationalEffectChart } from "../components/ActivityCharts";
 import { activityApi } from "../api/activity";
 import { issuesApi } from "../api/issues";
 import { usePanel } from "../context/PanelContext";
@@ -41,6 +41,7 @@ import { PackageFileTree, buildFileTree } from "../components/PackageFileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { cn } from "../lib/utils";
+import { getRunOperationalEffectBadge, getRunOperationalEffect, runTextSummary } from "../lib/run-operational-effect";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs } from "@/components/ui/tabs";
@@ -283,6 +284,24 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function RunOperationalEffectBadge({ run }: { run: HeartbeatRun }) {
+  const badge = getRunOperationalEffectBadge(run);
+  if (!badge) return null;
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+        badge.tone === "positive"
+          ? "bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+          : "bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+      )}
+    >
+      {badge.label}
+    </span>
+  );
 }
 
 function parseStoredLogContent(content: string): RunLogChunk[] {
@@ -1075,9 +1094,7 @@ function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: strin
   const isLive = run.status === "running" || run.status === "queued";
   const statusInfo = runStatusIcons[run.status] ?? { icon: Clock, color: "text-neutral-400" };
   const StatusIcon = statusInfo.icon;
-  const summary = run.resultJson
-    ? String((run.resultJson as Record<string, unknown>).summary ?? (run.resultJson as Record<string, unknown>).result ?? "")
-    : run.error ?? "";
+  const summary = runTextSummary(run) ?? "";
 
   return (
     <div className="space-y-3">
@@ -1109,6 +1126,7 @@ function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: strin
         <div className="flex items-center gap-2">
           <StatusIcon className={cn("h-3.5 w-3.5", statusInfo.color, run.status === "running" && "animate-spin")} />
           <StatusBadge status={run.status} />
+          <RunOperationalEffectBadge run={run} />
           <span className="font-mono text-xs text-muted-foreground">{run.id.slice(0, 8)}</span>
           <span className={cn(
             "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",
@@ -1165,8 +1183,8 @@ function AgentOverview({
         <ChartCard title="Issues by Status" subtitle="Last 14 days">
           <IssueStatusChart issues={assignedIssues} />
         </ChartCard>
-        <ChartCard title="Success Rate" subtitle="Last 14 days">
-          <SuccessRateChart runs={runs} />
+        <ChartCard title="Operational Effect" subtitle="Finished vs produced effect">
+          <OperationalEffectChart runs={runs} />
         </ChartCard>
       </div>
 
@@ -1248,6 +1266,12 @@ function CostsSection({
             <div>
               <span className="text-xs text-muted-foreground block">Total cost</span>
               <span className="text-lg font-semibold">{formatCents(runtimeState.totalCostCents)}</span>
+              {runtimeState.totalCostCents === 0
+                && (runtimeState.totalInputTokens > 0 || runtimeState.totalOutputTokens > 0 || runtimeState.totalCachedInputTokens > 0) ? (
+                  <span className="mt-1 block text-[11px] text-muted-foreground">
+                    Usage tracked; billed cost may be zero when runs are subscription-included.
+                  </span>
+                ) : null}
             </div>
           </div>
         </div>
@@ -2735,9 +2759,7 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
   const statusInfo = runStatusIcons[run.status] ?? { icon: Clock, color: "text-neutral-400" };
   const StatusIcon = statusInfo.icon;
   const metrics = runMetrics(run);
-  const summary = run.resultJson
-    ? String((run.resultJson as Record<string, unknown>).summary ?? (run.resultJson as Record<string, unknown>).result ?? "")
-    : run.error ?? "";
+  const summary = runTextSummary(run) ?? "";
 
   return (
     <Link
@@ -2752,6 +2774,7 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
         <span className="font-mono text-xs text-muted-foreground">
           {run.id.slice(0, 8)}
         </span>
+        <RunOperationalEffectBadge run={run} />
         <span className={cn(
           "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0",
           run.invocationSource === "timer" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
@@ -3010,6 +3033,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
   const sessionChanged = run.sessionIdBefore && run.sessionIdAfter && run.sessionIdBefore !== run.sessionIdAfter;
   const sessionId = run.sessionIdAfter || run.sessionIdBefore;
   const hasNonZeroExit = run.exitCode !== null && run.exitCode !== 0;
+  const operationalEffect = getRunOperationalEffect(run);
 
   return (
     <div className="space-y-4 min-w-0">
@@ -3020,6 +3044,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
           <div className="flex-1 p-4 space-y-3">
             <div className="flex items-center gap-2">
               <StatusBadge status={run.status} />
+              <RunOperationalEffectBadge run={run} />
               {(run.status === "running" || run.status === "queued") && (
                 <Button
                   variant="ghost"
@@ -3056,6 +3081,13 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
                 </Button>
               )}
             </div>
+            {operationalEffect && run.status !== "running" && run.status !== "queued" && (
+              <p className="text-xs text-muted-foreground">
+                Operational effect: {operationalEffect.producedEffect
+                  ? (operationalEffect.summary ?? `${operationalEffect.activityCount} activity events`)
+                  : "none recorded"}
+              </p>
+            )}
             {resumeRun.isError && (
               <div className="text-xs text-destructive">
                 {resumeRun.error instanceof Error ? resumeRun.error.message : "Failed to resume run"}

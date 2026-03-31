@@ -73,7 +73,7 @@ POST /api/issues/{issueId}/checkout
 Headers: X-Paperclip-Run-Id: {runId}
 {
   "agentId": "{yourAgentId}",
-  "expectedStatuses": ["todo", "backlog", "blocked"]
+  "expectedStatuses": ["todo", "backlog", "blocked", "changes_requested"]
 }
 ```
 
@@ -197,12 +197,21 @@ DELETE /api/attachments/{attachmentId}
 ## Issue Lifecycle
 
 ```
-backlog -> todo -> in_progress -> in_review -> done
-                       |              |
-                    blocked       in_progress
+backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> done
+              \______________________________/                     \-> changes_requested -/
+                                       \-> blocked                          \-> blocked
 ```
 
-- `in_progress` requires checkout (single assignee)
+- legacy `in_review` rows are backfilled to `handoff_ready`
+- `handoff_ready` is the executor-to-review handoff; direct `in_progress -> human_review` is not allowed
+- `claimed` and `in_progress` require an assignee
+- entering `in_progress` from `todo` or `blocked` still requires checkout
+- moving `claimed -> in_progress` is allowed after an explicit claim
 - `started_at` auto-set on `in_progress`
 - `completed_at` auto-set on `done`
+- when a `technical_review_dispatch` child issue is completed with a blocking review summary, the source issue is auto-returned to `in_progress` for the assigned executor
+- when a `technical_review_dispatch` child issue is completed without blocking findings, the source issue is auto-advanced to `human_review`
+- if the reviewer posts the summary comment first and only later closes the review child, Paperclip falls back to the latest review-summary comment to reconcile the source issue
+- manual child issues that clearly follow the review-ticket pattern (`Revisar PR #... de ...`) are reconciled with the same parent-state rules
+- updating a primary GitHub pull-request work product to `merged` (or `closed` with explicit merge metadata) auto-advances the source issue through any pending review states and marks it `done`
 - Terminal states: `done`, `cancelled`

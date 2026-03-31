@@ -17,6 +17,7 @@ import { formatAssigneeUserLabel } from "../lib/assignees";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { Identity } from "./Identity";
+import { IssueCurrentOwnerBadge } from "./IssueCurrentOwnerBadge";
 import { formatDate, cn, projectUrl } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { Separator } from "@/components/ui/separator";
@@ -652,6 +653,18 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
         >
           {assigneeContent}
         </PropertyPicker>
+
+        {issue.currentOwner ? (
+          <PropertyRow label="Acts now">
+            <IssueCurrentOwnerBadge
+              issue={issue}
+              agentName={(id) => agentName(id)}
+              currentUserId={currentUserId}
+              showRole={false}
+              className="max-w-full"
+            />
+          </PropertyRow>
+        ) : null}
 
         <PropertyPicker
           inline={inline}

@@ -1,4 +1,4 @@
-import type { ActivityEvent } from "@paperclipai/shared";
+import type { ActivityEvent, HeartbeatRunOperationalEffect } from "@paperclipai/shared";
 import { api } from "./client";
 
 export interface RunForIssue {
@@ -11,6 +11,7 @@ export interface RunForIssue {
   invocationSource: string;
   usageJson: Record<string, unknown> | null;
   resultJson: Record<string, unknown> | null;
+  operationalEffect?: HeartbeatRunOperationalEffect | null;
 }
 
 export interface IssueForRun {

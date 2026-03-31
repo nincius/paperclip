@@ -9,6 +9,7 @@ const agentId = "11111111-1111-4111-8111-111111111111";
 const routineId = "33333333-3333-4333-8333-333333333333";
 const projectId = "44444444-4444-4444-8444-444444444444";
 const otherAgentId = "55555555-5555-4555-8555-555555555555";
+const unrelatedAgentId = "77777777-7777-4777-8777-777777777777";
 
 const routine = {
   id: routineId,
@@ -79,12 +80,18 @@ const mockRoutineService = vi.hoisted(() => ({
 
 const mockAccessService = vi.hoisted(() => ({
   canUser: vi.fn(),
+  hasPermission: vi.fn(),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+  getChainOfCommand: vi.fn(),
+}));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
+  agentService: () => mockAgentService,
   logActivity: mockLogActivity,
   routineService: () => mockRoutineService,
 }));
@@ -114,6 +121,20 @@ describe("routine routes", () => {
       status: "issue_created",
     });
     mockAccessService.canUser.mockResolvedValue(false);
+    mockAccessService.hasPermission.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === agentId) {
+        return { id: agentId, companyId, role: "manager", permissions: null };
+      }
+      if (id === otherAgentId) {
+        return { id: otherAgentId, companyId, role: "engineer", permissions: null };
+      }
+      if (id === unrelatedAgentId) {
+        return { id: unrelatedAgentId, companyId, role: "engineer", permissions: null };
+      }
+      return null;
+    });
+    mockAgentService.getChainOfCommand.mockResolvedValue([]);
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -266,6 +287,89 @@ describe("routine routes", () => {
     }), {
       agentId: null,
       userId: "board-user",
+    });
+  });
+
+  it("allows an agent manager with routine policy to create a routine for a report", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockAgentService.getChainOfCommand.mockResolvedValue([
+      { id: agentId, name: "Manager", role: "manager", title: null },
+    ]);
+    mockRoutineService.create.mockResolvedValue({ ...routine, assigneeAgentId: otherAgentId });
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Daily routine",
+        assigneeAgentId: otherAgentId,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockRoutineService.create).toHaveBeenCalledWith(companyId, expect.objectContaining({
+      projectId,
+      title: "Daily routine",
+      assigneeAgentId: otherAgentId,
+    }), {
+      agentId,
+      userId: null,
+    });
+  });
+
+  it("blocks an agent from creating a routine for an unrelated agent", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Daily routine",
+        assigneeAgentId: unrelatedAgentId,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("their reports");
+    expect(mockRoutineService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent manager with routine policy to update a report's routine", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockAgentService.getChainOfCommand.mockResolvedValue([
+      { id: agentId, name: "Manager", role: "manager", title: null },
+    ]);
+    mockRoutineService.get.mockResolvedValue({ ...routine, assigneeAgentId: otherAgentId });
+    mockRoutineService.update.mockResolvedValue({ ...routine, assigneeAgentId: otherAgentId, status: "paused" });
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({
+        status: "paused",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockRoutineService.update).toHaveBeenCalledWith(routineId, { status: "paused" }, {
+      agentId,
+      userId: null,
     });
   });
 });

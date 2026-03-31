@@ -26,7 +26,12 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
+import {
+  agentHealthMonitorService,
+  heartbeatService,
+  reconcilePersistedRuntimeServicesOnStartup,
+  routineService,
+} from "./services/index.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
@@ -527,6 +532,7 @@ export async function startServer(): Promise<StartedServer> {
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
+    const agentHealthMonitor = agentHealthMonitorService(db as any);
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -557,6 +563,17 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "routine scheduler tick failed");
+        });
+
+      void agentHealthMonitor
+        .tick(new Date())
+        .then((result) => {
+          if (result.created > 0 || result.updated > 0 || result.resolved > 0) {
+            logger.info({ ...result }, "agent health monitor reconciled alerts");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "agent health monitor tick failed");
         });
   
       // Periodically reap orphaned runs (5-min staleness threshold) and make sure

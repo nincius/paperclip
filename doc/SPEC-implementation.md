@@ -194,7 +194,7 @@ Invariant: at least one root `company` level goal per company.
 - `parent_id` uuid fk `issues.id` null
 - `title` text not null
 - `description` text null
-- `status` enum: `backlog | todo | in_progress | in_review | done | blocked | cancelled`
+- `status` enum: `backlog | todo | claimed | in_progress | handoff_ready | technical_review | changes_requested | human_review | done | blocked | cancelled`
 - `priority` enum: `critical | high | medium | low`
 - `assignee_agent_id` uuid fk `agents.id` null
 - `created_by_agent_id` uuid fk `agents.id` null
@@ -378,10 +378,14 @@ Allowed transitions:
 Allowed transitions:
 
 - `backlog -> todo | cancelled`
-- `todo -> in_progress | blocked | cancelled`
-- `in_progress -> in_review | blocked | done | cancelled`
-- `in_review -> in_progress | done | cancelled`
-- `blocked -> todo | in_progress | cancelled`
+- `todo -> claimed | blocked | cancelled`
+- `claimed -> todo | in_progress | blocked | cancelled`
+- `in_progress -> handoff_ready | blocked | done | cancelled`
+- `handoff_ready -> in_progress | technical_review | blocked | cancelled`
+- `technical_review -> changes_requested | human_review | blocked | cancelled`
+- `changes_requested -> claimed | in_progress | blocked | cancelled`
+- `human_review -> changes_requested | blocked | done | cancelled`
+- `blocked -> todo | claimed | in_progress | cancelled`
 - terminal: `done`, `cancelled`
 
 Side effects:

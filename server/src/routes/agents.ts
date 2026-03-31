@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable, companies, heartbeatRuns } from "@paperclipai/db";
@@ -61,6 +62,7 @@ import {
   loadDefaultAgentInstructionsBundle,
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
+import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -80,6 +82,10 @@ export function agentRoutes(db: Db) {
     "instructionsFilePath",
     "agentsMdPath",
   ] as const;
+  const REQUIRED_AGENT_BOOTSTRAP_FILES = ["AGENTS.md", "HEARTBEAT.md", "SOUL.md", "TOOLS.md"] as const;
+  const NON_BLOCKING_BOOTSTRAP_WARN_CODES = new Set([
+    "claude_anthropic_api_key_overrides_subscription",
+  ]);
 
   const router = Router();
   const svc = agentService(db);
@@ -310,6 +316,68 @@ export function agentRoutes(db: Db) {
     return trimmed.length > 0 ? trimmed : null;
   }
 
+  function jsonEqual(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function isManagedInstructionsAdapterType(adapterType: string | null | undefined) {
+    return typeof adapterType === "string" && DEFAULT_MANAGED_INSTRUCTIONS_ADAPTER_TYPES.has(adapterType);
+  }
+
+  function buildBootstrapInstructionFiles(
+    promptTemplate: string | null,
+    defaults: Record<string, string>,
+  ): Record<string, string> {
+    if (!promptTemplate || promptTemplate.trim().length === 0) {
+      return defaults;
+    }
+    const supportFiles = Object.fromEntries(
+      Object.entries(defaults).filter(([fileName]) => fileName !== "AGENTS.md"),
+    );
+    return {
+      ...supportFiles,
+      "AGENTS.md": promptTemplate,
+    };
+  }
+
+  function resolveBootstrapBundleRelativePath(
+    bundle: {
+      entryFile: string;
+      files: Array<{ path: string }>;
+    },
+    fileName: (typeof REQUIRED_AGENT_BOOTSTRAP_FILES)[number],
+  ): string | null {
+    const exactMatch = bundle.files.find((file) => file.path === fileName);
+    if (exactMatch) return exactMatch.path;
+
+    if (fileName === "AGENTS.md" && path.posix.basename(bundle.entryFile) === fileName) {
+      return bundle.entryFile;
+    }
+
+    const basenameMatches = bundle.files.filter((file) => path.posix.basename(file.path) === fileName);
+    if (basenameMatches.length > 1) {
+      throw unprocessable(
+        `Agent instructions bundle contains multiple candidates for ${fileName}; keep exactly one file with that name.`,
+      );
+    }
+    return basenameMatches[0]?.path ?? null;
+  }
+
+  async function ensureAgentHomeBootstrapFile(targetPath: string, sourcePath: string) {
+    const existing = await fs.lstat(targetPath).catch(() => null);
+    if (existing?.isDirectory()) {
+      throw unprocessable(`Cannot prepare agent bootstrap path ${targetPath}: path is a directory.`);
+    }
+
+    if (existing) {
+      const resolvedExisting = await fs.realpath(targetPath).catch(() => null);
+      if (resolvedExisting === sourcePath) return;
+      await fs.rm(targetPath, { force: true });
+    }
+
+    await fs.symlink(sourcePath, targetPath);
+  }
+
   function preserveInstructionsBundleConfig(
     existingAdapterConfig: Record<string, unknown>,
     nextAdapterConfig: Record<string, unknown>,
@@ -442,7 +510,7 @@ export function agentRoutes(db: Db) {
     return path.resolve(cwd, trimmed);
   }
 
-  async function materializeDefaultInstructionsBundleForNewAgent<T extends {
+  async function prepareManagedInstructionsBootstrap<T extends {
     id: string;
     companyId: string;
     name: string;
@@ -450,37 +518,131 @@ export function agentRoutes(db: Db) {
     adapterType: string;
     adapterConfig: unknown;
   }>(agent: T): Promise<T> {
-    if (!DEFAULT_MANAGED_INSTRUCTIONS_ADAPTER_TYPES.has(agent.adapterType)) {
+    if (!isManagedInstructionsAdapterType(agent.adapterType)) {
       return agent;
     }
 
-    const adapterConfig = asRecord(agent.adapterConfig) ?? {};
-    const hasExplicitInstructionsBundle =
-      Boolean(asNonEmptyString(adapterConfig.instructionsBundleMode))
-      || Boolean(asNonEmptyString(adapterConfig.instructionsRootPath))
-      || Boolean(asNonEmptyString(adapterConfig.instructionsEntryFile))
-      || Boolean(asNonEmptyString(adapterConfig.instructionsFilePath))
-      || Boolean(asNonEmptyString(adapterConfig.agentsMdPath));
-    if (hasExplicitInstructionsBundle) {
-      return agent;
-    }
-
+    const defaultFiles = await loadDefaultAgentInstructionsBundle(
+      resolveDefaultAgentInstructionsBundleRole(agent.role),
+    );
+    let nextAgent = agent;
+    const adapterConfig = asRecord(nextAgent.adapterConfig) ?? {};
     const promptTemplate = typeof adapterConfig.promptTemplate === "string"
       ? adapterConfig.promptTemplate
-      : "";
-    const files = promptTemplate.trim().length === 0
-      ? await loadDefaultAgentInstructionsBundle(resolveDefaultAgentInstructionsBundleRole(agent.role))
-      : { "AGENTS.md": promptTemplate };
-    const materialized = await instructions.materializeManagedBundle(
-      agent,
-      files,
-      { entryFile: "AGENTS.md", replaceExisting: false },
-    );
-    const nextAdapterConfig = { ...materialized.adapterConfig };
-    delete nextAdapterConfig.promptTemplate;
+      : null;
+    const bootstrapFiles = buildBootstrapInstructionFiles(promptTemplate, defaultFiles);
+    let bundle = await instructions.getBundle(nextAgent);
 
-    const updated = await svc.update(agent.id, { adapterConfig: nextAdapterConfig });
-    return (updated as T | null) ?? { ...agent, adapterConfig: nextAdapterConfig };
+    if (bundle.mode !== "external" && (!bundle.rootPath || bundle.mode !== "managed")) {
+      const materialized = await instructions.materializeManagedBundle(
+        nextAgent,
+        bootstrapFiles,
+        { entryFile: "AGENTS.md", replaceExisting: false },
+      );
+      const nextAdapterConfig = { ...materialized.adapterConfig };
+      delete nextAdapterConfig.promptTemplate;
+      nextAgent = {
+        ...nextAgent,
+        adapterConfig: nextAdapterConfig,
+      };
+      bundle = materialized.bundle;
+    }
+
+    if (bundle.mode !== "managed") {
+      return nextAgent;
+    }
+
+    for (const fileName of REQUIRED_AGENT_BOOTSTRAP_FILES) {
+      if (resolveBootstrapBundleRelativePath(bundle, fileName)) continue;
+      const content = bootstrapFiles[fileName];
+      const result = await instructions.writeFile(nextAgent, fileName, content, {
+        clearLegacyPromptTemplate: fileName === "AGENTS.md",
+      });
+      const nextAdapterConfig = { ...result.adapterConfig };
+      delete nextAdapterConfig.promptTemplate;
+      nextAgent = {
+        ...nextAgent,
+        adapterConfig: nextAdapterConfig,
+      };
+      bundle = result.bundle;
+    }
+
+    return nextAgent;
+  }
+
+  async function validateAgentBootstrap<T extends {
+    id: string;
+    companyId: string;
+    name: string;
+    role: string;
+    adapterType: string;
+    adapterConfig: unknown;
+  }>(agent: T): Promise<T> {
+    const preparedAgent = await prepareManagedInstructionsBootstrap(agent);
+    const bundle = await instructions.getBundle(preparedAgent);
+
+    if (isManagedInstructionsAdapterType(preparedAgent.adapterType)) {
+      if (!bundle.rootPath) {
+        throw unprocessable(
+          `Agent bootstrap is incomplete: no instructions bundle root was resolved for ${preparedAgent.name}.`,
+        );
+      }
+
+      const missingFiles = REQUIRED_AGENT_BOOTSTRAP_FILES.filter(
+        (fileName) => !resolveBootstrapBundleRelativePath(bundle, fileName),
+      );
+      if (missingFiles.length > 0) {
+        throw unprocessable(
+          `Agent bootstrap is incomplete: missing ${missingFiles.join(", ")} in ${bundle.rootPath}.`,
+        );
+      }
+
+      const agentHome = resolveDefaultAgentWorkspaceDir(preparedAgent.id);
+      await fs.mkdir(agentHome, { recursive: true });
+      for (const fileName of REQUIRED_AGENT_BOOTSTRAP_FILES) {
+        const relativePath = resolveBootstrapBundleRelativePath(bundle, fileName);
+        if (!relativePath) continue;
+        const sourcePath = path.resolve(bundle.rootPath, relativePath);
+        const stat = await fs.stat(sourcePath).catch(() => null);
+        if (!stat?.isFile()) {
+          throw unprocessable(
+            `Agent bootstrap is incomplete: expected file ${sourcePath} for ${fileName} is not readable.`,
+          );
+        }
+        await ensureAgentHomeBootstrapFile(path.join(agentHome, fileName), sourcePath);
+      }
+    }
+
+    const adapter = findServerAdapter(preparedAgent.adapterType);
+    if (!adapter) {
+      throw unprocessable(`Unknown adapter type: ${preparedAgent.adapterType}`);
+    }
+
+    const preparedAdapterConfig = asRecord(preparedAgent.adapterConfig) ?? {};
+    const { config: runtimeAdapterConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
+      preparedAgent.companyId,
+      preparedAdapterConfig,
+    );
+    const environmentResult = await adapter.testEnvironment({
+      companyId: preparedAgent.companyId,
+      adapterType: preparedAgent.adapterType,
+      config: runtimeAdapterConfig,
+    });
+    const blockingChecks = environmentResult.checks.filter(
+      (check) =>
+        check.level === "error"
+        || (check.level === "warn" && !NON_BLOCKING_BOOTSTRAP_WARN_CODES.has(check.code)),
+    );
+    if (blockingChecks.length > 0) {
+      const detail = blockingChecks
+        .map((check) => `${check.code}: ${check.message}`)
+        .join(" | ");
+      throw unprocessable(
+        `Agent bootstrap validation failed for ${preparedAgent.adapterType}: ${detail}`,
+      );
+    }
+
+    return preparedAgent;
   }
 
   async function assertCanManageInstructionsPath(req: Request, targetAgent: { id: string; companyId: string }) {
@@ -979,6 +1141,7 @@ export function agentRoutes(db: Db) {
     const rows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
       status: "todo,in_progress,blocked",
+      includeRoutineExecutions: true,
     });
 
     res.json(
@@ -1182,9 +1345,18 @@ export function agentRoutes(db: Db) {
       hireInput.adapterType,
       normalizedAdapterConfig,
     );
+    const draftAgentId = randomUUID();
+    const validatedDraftAgent = await validateAgentBootstrap({
+      id: draftAgentId,
+      companyId,
+      name: hireInput.name,
+      role: hireInput.role ?? "general",
+      adapterType: hireInput.adapterType ?? "process",
+      adapterConfig: normalizedAdapterConfig,
+    });
     const normalizedHireInput = {
       ...hireInput,
-      adapterConfig: normalizedAdapterConfig,
+      adapterConfig: validatedDraftAgent.adapterConfig,
     };
 
     const company = await db
@@ -1200,12 +1372,13 @@ export function agentRoutes(db: Db) {
     const requiresApproval = company.requireBoardApprovalForNewAgents;
     const status = requiresApproval ? "pending_approval" : "idle";
     const createdAgent = await svc.create(companyId, {
+      id: draftAgentId,
       ...normalizedHireInput,
       status,
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     });
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent);
+    const agent = createdAgent;
 
     let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
     const actor = getActorInfo(req);
@@ -1342,15 +1515,25 @@ export function agentRoutes(db: Db) {
       createInput.adapterType,
       normalizedAdapterConfig,
     );
+    const draftAgentId = randomUUID();
+    const validatedDraftAgent = await validateAgentBootstrap({
+      id: draftAgentId,
+      companyId,
+      name: createInput.name,
+      role: createInput.role ?? "general",
+      adapterType: createInput.adapterType ?? "process",
+      adapterConfig: normalizedAdapterConfig,
+    });
 
     const createdAgent = await svc.create(companyId, {
+      id: draftAgentId,
       ...createInput,
-      adapterConfig: normalizedAdapterConfig,
+      adapterConfig: validatedDraftAgent.adapterConfig,
       status: "idle",
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     });
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent);
+    const agent = createdAgent;
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -1770,6 +1953,23 @@ export function agentRoutes(db: Db) {
       );
     }
 
+    const validatedDraftAgent = await validateAgentBootstrap({
+      id: existing.id,
+      companyId: existing.companyId,
+      name: typeof patchData.name === "string" ? patchData.name : existing.name,
+      role: typeof patchData.role === "string" ? patchData.role : existing.role,
+      adapterType: requestedAdapterType,
+      adapterConfig:
+        Object.prototype.hasOwnProperty.call(patchData, "adapterConfig")
+          ? patchData.adapterConfig
+          : existing.adapterConfig,
+    });
+    if (!jsonEqual(validatedDraftAgent.adapterConfig, existing.adapterConfig)) {
+      patchData.adapterConfig = validatedDraftAgent.adapterConfig;
+    } else if (Object.prototype.hasOwnProperty.call(patchData, "adapterConfig")) {
+      patchData.adapterConfig = validatedDraftAgent.adapterConfig;
+    }
+
     const actor = getActorInfo(req);
     const agent = await svc.update(id, patchData, {
       recordRevision: {
@@ -1995,6 +2195,14 @@ export function agentRoutes(db: Db) {
       {
         triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+        forceFreshSession: req.body?.forceFreshSession === true,
+        ...(typeof req.body?.issueId === "string" && req.body.issueId ? { issueId: req.body.issueId } : {}),
+        ...(typeof req.body?.taskId === "string" && req.body.taskId ? { taskId: req.body.taskId } : {}),
+        ...(typeof req.body?.taskKey === "string" && req.body.taskKey ? { taskKey: req.body.taskKey } : {}),
+        ...(typeof req.body?.commentId === "string" && req.body.commentId ? { commentId: req.body.commentId } : {}),
+        ...(typeof req.body?.wakeCommentId === "string" && req.body.wakeCommentId
+          ? { wakeCommentId: req.body.wakeCommentId }
+          : {}),
       },
       "manual",
       {
@@ -2276,7 +2484,10 @@ export function agentRoutes(db: Db) {
     }
     assertCompanyAccess(req, issue.companyId);
 
-    let run = issue.executionRunId ? await heartbeat.getRun(issue.executionRunId) : null;
+    type HeartbeatRunRecord = NonNullable<Awaited<ReturnType<typeof heartbeat.getRun>>>;
+    let run: HeartbeatRunRecord | null = issue.executionRunId
+      ? (await heartbeat.getRun(issue.executionRunId)) as HeartbeatRunRecord | null
+      : null;
     if (run && run.status !== "queued" && run.status !== "running") {
       run = null;
     }
@@ -2286,7 +2497,7 @@ export function agentRoutes(db: Db) {
       const candidateContext = asRecord(candidateRun?.contextSnapshot);
       const candidateIssueId = asNonEmptyString(candidateContext?.issueId);
       if (candidateRun && candidateIssueId === issue.id) {
-        run = candidateRun;
+        run = candidateRun as HeartbeatRunRecord;
       }
     }
     if (!run) {

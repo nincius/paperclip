@@ -61,6 +61,8 @@ const mockBudgetService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   listTaskSessions: vi.fn(),
   resetRuntimeSession: vi.fn(),
+  wakeup: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({
@@ -173,7 +175,10 @@ describe("agent permission routes", () => {
     );
     mockSecretService.normalizeAdapterConfigForPersistence.mockImplementation(async (_companyId, config) => config);
     mockSecretService.resolveAdapterConfigForRuntime.mockImplementation(async (_companyId, config) => ({ config }));
+    mockIssueService.list.mockResolvedValue([]);
     mockLogActivity.mockResolvedValue(undefined);
+    mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
+    mockHeartbeatService.invoke.mockResolvedValue({ id: "run-1" });
   });
 
   it("grants tasks:assign by default when board creates a new agent", async () => {
@@ -271,5 +276,118 @@ describe("agent permission routes", () => {
     );
     expect(res.body.access.canAssignTasks).toBe(true);
     expect(res.body.access.taskAssignSource).toBe("agent_creator");
+  });
+
+  it("passes forceFreshSession through heartbeat invoke requests", async () => {
+    const app = createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/agents/${agentId}/heartbeat/invoke`)
+      .send({ forceFreshSession: true });
+
+    expect(res.status).toBe(202);
+    expect(mockHeartbeatService.invoke).toHaveBeenCalledWith(
+      agentId,
+      "on_demand",
+      expect.objectContaining({
+        triggeredBy: "board",
+        actorId: "board-user",
+        forceFreshSession: true,
+      }),
+      "manual",
+      expect.objectContaining({
+        actorType: "user",
+        actorId: "board-user",
+      }),
+    );
+  });
+
+  it("passes issue retry context through heartbeat invoke requests", async () => {
+    const app = createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/agents/${agentId}/heartbeat/invoke`)
+      .send({
+        forceFreshSession: true,
+        issueId: "issue-123",
+        taskId: "issue-123",
+        taskKey: "issue-123",
+        commentId: "comment-123",
+        wakeCommentId: "comment-123",
+      });
+
+    expect(res.status).toBe(202);
+    expect(mockHeartbeatService.invoke).toHaveBeenCalledWith(
+      agentId,
+      "on_demand",
+      expect.objectContaining({
+        triggeredBy: "board",
+        actorId: "board-user",
+        forceFreshSession: true,
+        issueId: "issue-123",
+        taskId: "issue-123",
+        taskKey: "issue-123",
+        commentId: "comment-123",
+        wakeCommentId: "comment-123",
+      }),
+      "manual",
+      expect.objectContaining({
+        actorType: "user",
+        actorId: "board-user",
+      }),
+    );
+  });
+
+  it("includes routine execution issues in agent inbox-lite", async () => {
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: "issue-1",
+        identifier: "TCN-158",
+        title: "Despachar fila de revisão para Revisor PR",
+        status: "todo",
+        priority: "high",
+        projectId: "project-1",
+        goalId: "goal-1",
+        parentId: "parent-1",
+        updatedAt: new Date("2026-03-30T18:11:22.699Z"),
+        activeRun: null,
+        originKind: "routine_execution",
+      },
+    ]);
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "api_key",
+    });
+
+    const res = await request(app).get("/api/agents/me/inbox-lite");
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
+      assigneeAgentId: agentId,
+      status: "todo,in_progress,blocked",
+      includeRoutineExecutions: true,
+    });
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        identifier: "TCN-158",
+        title: "Despachar fila de revisão para Revisor PR",
+        status: "todo",
+      }),
+    ]);
   });
 });

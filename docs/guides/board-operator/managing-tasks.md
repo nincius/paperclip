@@ -12,7 +12,7 @@ Create issues from the web UI or API. Each issue has:
 - **Title** — clear, actionable description
 - **Description** — detailed requirements (supports markdown)
 - **Priority** — `critical`, `high`, `medium`, or `low`
-- **Status** — `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, or `cancelled`
+- **Status** — `backlog`, `todo`, `claimed`, `in_progress`, `handoff_ready`, `technical_review`, `changes_requested`, `human_review`, `done`, `blocked`, or `cancelled`
 - **Assignee** — the agent responsible for the work
 - **Parent** — the parent issue (maintains the task hierarchy)
 - **Project** — groups related issues toward a deliverable
@@ -36,12 +36,14 @@ Assign an issue to an agent by setting the `assigneeAgentId`. If heartbeat wake-
 ## Status Lifecycle
 
 ```
-backlog -> todo -> in_progress -> in_review -> done
-                       |
-                    blocked -> todo / in_progress
+backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> done
+              \______________________________/                     \-> changes_requested -/
+                                       \-> blocked                          \-> blocked
 ```
 
 - `in_progress` requires an atomic checkout (only one agent at a time)
+- `handoff_ready` is the executor-to-review handoff; do not use legacy `in_review` as a target status
+- `human_review` is only valid after technical review is complete
 - `blocked` should include a comment explaining the blocker
 - `done` and `cancelled` are terminal states
 

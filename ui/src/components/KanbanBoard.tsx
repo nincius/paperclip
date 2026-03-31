@@ -20,21 +20,9 @@ import {
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { Identity } from "./Identity";
+import { IssueCurrentOwnerBadge } from "./IssueCurrentOwnerBadge";
+import { issueBoardStatuses, issueStatusLabel } from "../lib/issue-status";
 import type { Issue } from "@paperclipai/shared";
-
-const boardStatuses = [
-  "backlog",
-  "todo",
-  "in_progress",
-  "in_review",
-  "blocked",
-  "done",
-  "cancelled",
-];
-
-function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 interface Agent {
   id: string;
@@ -68,7 +56,7 @@ function KanbanColumn({
       <div className="flex items-center gap-2 px-2 py-2 mb-1">
         <StatusIcon status={status} />
         <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {statusLabel(status)}
+          {issueStatusLabel(status)}
         </span>
         <span className="text-xs text-muted-foreground/60 ml-auto tabular-nums">
           {issues.length}
@@ -173,6 +161,9 @@ function KanbanCard({
             );
           })()}
         </div>
+        <div className="mt-2">
+          <IssueCurrentOwnerBadge issue={issue} agentName={agentName} className="max-w-full" />
+        </div>
       </Link>
     </div>
   );
@@ -194,7 +185,7 @@ export function KanbanBoard({
 
   const columnIssues = useMemo(() => {
     const grouped: Record<string, Issue[]> = {};
-    for (const status of boardStatuses) {
+    for (const status of issueBoardStatuses) {
       grouped[status] = [];
     }
     for (const issue of issues) {
@@ -227,7 +218,7 @@ export function KanbanBoard({
     // or another card's id. Find which column the "over" belongs to.
     let targetStatus: string | null = null;
 
-    if (boardStatuses.includes(over.id as string)) {
+    if (issueBoardStatuses.includes(over.id as typeof issueBoardStatuses[number])) {
       targetStatus = over.id as string;
     } else {
       // It's a card - find which column it's in
@@ -254,7 +245,7 @@ export function KanbanBoard({
       onDragEnd={handleDragEnd}
     >
       <div className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">
-        {boardStatuses.map((status) => (
+        {issueBoardStatuses.map((status) => (
           <KanbanColumn
             key={status}
             status={status}

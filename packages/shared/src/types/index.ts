@@ -74,6 +74,9 @@ export type {
 } from "./work-product.js";
 export type {
   Issue,
+  IssueCurrentOwner,
+  IssueCurrentOwnerActorType,
+  IssueCurrentOwnerRole,
   IssueAssigneeAdapterOverrides,
   IssueComment,
   IssueDocument,
@@ -121,6 +124,8 @@ export type { CostEvent, CostSummary, CostByAgent, CostByProviderModel, CostByBi
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
 export type {
   HeartbeatRun,
+  HeartbeatRunOperationalEffect,
+  HeartbeatRunOperationalEffectCounts,
   HeartbeatRunEvent,
   AgentRuntimeState,
   AgentTaskSession,

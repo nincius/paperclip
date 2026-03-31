@@ -41,14 +41,16 @@ Issues are the unit of work. Every issue has:
 ### Status Lifecycle
 
 ```
-backlog -> todo -> in_progress -> in_review -> done
-                       |
-                    blocked
+backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> done
+              \______________________________/                     \-> changes_requested -/
+                                       \-> blocked                          \-> blocked
 ```
 
 Terminal states: `done`, `cancelled`.
 
-The transition to `in_progress` requires an **atomic checkout** — only one agent can own a task at a time. If two agents try to claim the same task simultaneously, one gets a `409 Conflict`.
+Legacy `in_review` items are backfilled to `handoff_ready`.
+
+The transition to `in_progress` from `todo` or `blocked` requires an **atomic checkout** — only one agent can own a task at a time. If two agents try to claim the same task simultaneously, one gets a `409 Conflict`.
 
 ## Heartbeats
 

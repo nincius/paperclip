@@ -8,12 +8,14 @@ import { authApi } from "../api/auth";
 import { queryKeys } from "../lib/queryKeys";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { groupBy } from "../lib/groupBy";
+import { issueFilterGroups, issueStatusLabel, issueStatusOrder } from "../lib/issue-status";
 import { formatDate, cn } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { EmptyState } from "./EmptyState";
 import { Identity } from "./Identity";
+import { IssueCurrentOwnerBadge } from "./IssueCurrentOwnerBadge";
 import { IssueRow } from "./IssueRow";
 import { PageSkeleton } from "./PageSkeleton";
 import { Button } from "@/components/ui/button";
@@ -27,11 +29,10 @@ import type { Issue } from "@paperclipai/shared";
 
 /* ── Helpers ── */
 
-const statusOrder = ["in_progress", "todo", "backlog", "in_review", "blocked", "done", "cancelled"];
 const priorityOrder = ["critical", "high", "medium", "low"];
 
-function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+function titleizeToken(value: string): string {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /* ── View state ── */
@@ -64,9 +65,7 @@ const defaultViewState: IssueViewState = {
 
 const quickFilterPresets = [
   { label: "All", statuses: [] as string[] },
-  { label: "Active", statuses: ["todo", "in_progress", "in_review", "blocked"] },
-  { label: "Backlog", statuses: ["backlog"] },
-  { label: "Done", statuses: ["done", "cancelled"] },
+  ...issueFilterGroups.map((group) => ({ label: group.label, statuses: [...group.statuses] })),
 ];
 
 function getViewState(key: string): IssueViewState {
@@ -117,7 +116,7 @@ function sortIssues(issues: Issue[], state: IssueViewState): Issue[] {
   sorted.sort((a, b) => {
     switch (state.sortField) {
       case "status":
-        return dir * (statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status));
+        return dir * (issueStatusOrder.indexOf(a.status as typeof issueStatusOrder[number]) - issueStatusOrder.indexOf(b.status as typeof issueStatusOrder[number]));
       case "priority":
         return dir * (priorityOrder.indexOf(a.priority) - priorityOrder.indexOf(b.priority));
       case "title":
@@ -277,15 +276,15 @@ export function IssuesList({
     }
     if (viewState.groupBy === "status") {
       const groups = groupBy(filtered, (i) => i.status);
-      return statusOrder
+      return issueStatusOrder
         .filter((s) => groups[s]?.length)
-        .map((s) => ({ key: s, label: statusLabel(s), items: groups[s]! }));
+        .map((s) => ({ key: s, label: issueStatusLabel(s), items: groups[s]! }));
     }
     if (viewState.groupBy === "priority") {
       const groups = groupBy(filtered, (i) => i.priority);
       return priorityOrder
         .filter((p) => groups[p]?.length)
-        .map((p) => ({ key: p, label: statusLabel(p), items: groups[p]! }));
+        .map((p) => ({ key: p, label: titleizeToken(p), items: groups[p]! }));
     }
     // assignee
     const groups = groupBy(
@@ -432,14 +431,14 @@ export function IssuesList({
                   <div className="space-y-1">
                     <span className="text-xs text-muted-foreground">Status</span>
                     <div className="space-y-0.5">
-                      {statusOrder.map((s) => (
+                      {issueStatusOrder.map((s) => (
                         <label key={s} className="flex items-center gap-2 px-2 py-1 rounded-sm hover:bg-accent/50 cursor-pointer">
                           <Checkbox
                             checked={viewState.statuses.includes(s)}
                             onCheckedChange={() => updateView({ statuses: toggleInArray(viewState.statuses, s) })}
                           />
                           <StatusIcon status={s} />
-                          <span className="text-sm">{statusLabel(s)}</span>
+                          <span className="text-sm">{issueStatusLabel(s)}</span>
                         </label>
                       ))}
                     </div>
@@ -458,7 +457,7 @@ export function IssuesList({
                               onCheckedChange={() => updateView({ priorities: toggleInArray(viewState.priorities, p) })}
                             />
                             <PriorityIcon priority={p} />
-                            <span className="text-sm">{statusLabel(p)}</span>
+                            <span className="text-sm">{titleizeToken(p)}</span>
                           </label>
                         ))}
                       </div>
@@ -741,6 +740,12 @@ export function IssuesList({
                           )}
                         </span>
                       )}
+                      <IssueCurrentOwnerBadge
+                        issue={issue}
+                        agentName={agentName}
+                        currentUserId={currentUserId}
+                        className="max-w-[180px]"
+                      />
                       <Popover
                         open={assigneePickerIssueId === issue.id}
                         onOpenChange={(open) => {

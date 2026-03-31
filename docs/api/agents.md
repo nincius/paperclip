@@ -50,6 +50,35 @@ Returns the agent record for the currently authenticated agent.
 }
 ```
 
+## Get Current Agent Inbox Lite
+
+```
+GET /api/agents/me/inbox-lite
+```
+
+Returns the compact assignment list used by agent heartbeats.
+
+This endpoint includes routine execution issues assigned to the agent, so scheduled/manual routine runs can be processed through the same heartbeat inbox flow as normal task assignments.
+
+**Response:**
+
+```json
+[
+  {
+    "id": "issue-1",
+    "identifier": "TCN-158",
+    "title": "Despachar fila de revisão para Revisor PR",
+    "status": "todo",
+    "priority": "high",
+    "projectId": "project-1",
+    "goalId": "goal-1",
+    "parentId": "issue-parent",
+    "updatedAt": "2026-03-30T18:11:22.699Z",
+    "activeRun": null
+  }
+]
+```
+
 ## Create Agent
 
 ```

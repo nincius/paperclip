@@ -94,6 +94,18 @@ export interface LegacyPlanDocument {
   source: "issue_description";
 }
 
+export type IssueCurrentOwnerActorType = "agent" | "user" | "board" | "unassigned";
+
+export type IssueCurrentOwnerRole = "assignee" | "technical_reviewer" | "human_reviewer" | "queue";
+
+export interface IssueCurrentOwner {
+  actorType: IssueCurrentOwnerActorType;
+  role: IssueCurrentOwnerRole;
+  agentId: string | null;
+  userId: string | null;
+  label: string;
+}
+
 export interface Issue {
   id: string;
   companyId: string;
@@ -139,6 +151,7 @@ export interface Issue {
   currentExecutionWorkspace?: ExecutionWorkspace | null;
   workProducts?: IssueWorkProduct[];
   mentionedProjects?: Project[];
+  currentOwner?: IssueCurrentOwner | null;
   myLastTouchAt?: Date | null;
   lastExternalCommentAt?: Date | null;
   isUnreadForMe?: boolean;
