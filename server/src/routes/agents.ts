@@ -605,6 +605,11 @@ export function agentRoutes(db: Db) {
     return nextAgent;
   }
 
+  async function wipeAgentWorkspaceDir(agentId: string): Promise<void> {
+    const agentHome = resolveDefaultAgentWorkspaceDir(agentId);
+    await fs.rm(agentHome, { recursive: true, force: true }).catch(() => {});
+  }
+
   async function validateAgentBootstrap<T extends {
     id: string;
     companyId: string;
@@ -612,9 +617,11 @@ export function agentRoutes(db: Db) {
     role: string;
     adapterType: string;
     adapterConfig: unknown;
-  }>(agent: T): Promise<T> {
+  }>(agent: T, options?: { ephemeralWorkspace?: boolean }): Promise<T> {
     const preparedAgent = await prepareManagedInstructionsBootstrap(agent);
     const bundle = await instructions.getBundle(preparedAgent);
+
+    let agentHomeBootstrapPlan: Array<{ fileName: string; sourcePath: string }> | null = null;
 
     if (isManagedInstructionsAdapterType(preparedAgent.adapterType)) {
       if (!bundle.rootPath) {
@@ -632,9 +639,7 @@ export function agentRoutes(db: Db) {
         );
       }
 
-      const agentHome = resolveDefaultAgentWorkspaceDir(preparedAgent.id);
-      await fs.mkdir(agentHome, { recursive: true });
-      await ensureAgentHomeDailyMemoryNote(preparedAgent.id);
+      agentHomeBootstrapPlan = [];
       for (const fileName of REQUIRED_AGENT_BOOTSTRAP_FILES) {
         const relativePath = resolveBootstrapBundleRelativePath(bundle, fileName);
         if (!relativePath) continue;
@@ -645,7 +650,7 @@ export function agentRoutes(db: Db) {
             `Agent bootstrap is incomplete: expected file ${sourcePath} for ${fileName} is not readable.`,
           );
         }
-        await ensureAgentHomeBootstrapFile(path.join(agentHome, fileName), sourcePath);
+        agentHomeBootstrapPlan.push({ fileName, sourcePath });
       }
     }
 
@@ -676,6 +681,23 @@ export function agentRoutes(db: Db) {
       throw unprocessable(
         `Agent bootstrap validation failed for ${preparedAgent.adapterType}: ${detail}`,
       );
+    }
+
+    if (agentHomeBootstrapPlan) {
+      const agentHome = resolveDefaultAgentWorkspaceDir(preparedAgent.id);
+      const materializeAgentHome = async () => {
+        await fs.mkdir(agentHome, { recursive: true });
+        await ensureAgentHomeDailyMemoryNote(preparedAgent.id);
+        for (const { fileName, sourcePath } of agentHomeBootstrapPlan) {
+          await ensureAgentHomeBootstrapFile(path.join(agentHome, fileName), sourcePath);
+        }
+      };
+      try {
+        await materializeAgentHome();
+      } catch (err) {
+        await wipeAgentWorkspaceDir(preparedAgent.id);
+        throw err;
+      }
     }
 
     return preparedAgent;
@@ -1192,6 +1214,7 @@ export function agentRoutes(db: Db) {
         projectId: issue.projectId,
         goalId: issue.goalId,
         parentId: issue.parentId,
+        createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
         activeRun: issue.activeRun,
       })),
@@ -1384,141 +1407,152 @@ export function agentRoutes(db: Db) {
       normalizedAdapterConfig,
     );
     const draftAgentId = randomUUID();
-    const validatedDraftAgent = await validateAgentBootstrap({
-      id: draftAgentId,
-      companyId,
-      name: hireInput.name,
-      role: hireInput.role ?? "general",
-      adapterType: hireInput.adapterType ?? "process",
-      adapterConfig: normalizedAdapterConfig,
-    });
-    const normalizedHireInput = {
-      ...hireInput,
-      adapterConfig: validatedDraftAgent.adapterConfig,
-    };
+    let agentPersisted = false;
+    try {
+      const validatedDraftAgent = await validateAgentBootstrap(
+        {
+          id: draftAgentId,
+          companyId,
+          name: hireInput.name,
+          role: hireInput.role ?? "general",
+          adapterType: hireInput.adapterType ?? "process",
+          adapterConfig: normalizedAdapterConfig,
+        },
+        { ephemeralWorkspace: true },
+      );
+      const normalizedHireInput = {
+        ...hireInput,
+        adapterConfig: validatedDraftAgent.adapterConfig,
+      };
 
-    const company = await db
-      .select()
-      .from(companies)
-      .where(eq(companies.id, companyId))
-      .then((rows) => rows[0] ?? null);
-    if (!company) {
-      res.status(404).json({ error: "Company not found" });
-      return;
-    }
+      const company = await db
+        .select()
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .then((rows) => rows[0] ?? null);
+      if (!company) {
+        res.status(404).json({ error: "Company not found" });
+        return;
+      }
 
-    const requiresApproval = company.requireBoardApprovalForNewAgents;
-    const status = requiresApproval ? "pending_approval" : "idle";
-    const createdAgent = await svc.create(companyId, {
-      id: draftAgentId,
-      ...normalizedHireInput,
-      status,
-      spentMonthlyCents: 0,
-      lastHeartbeatAt: null,
-    });
-    const agent = createdAgent;
+      const requiresApproval = company.requireBoardApprovalForNewAgents;
+      const status = requiresApproval ? "pending_approval" : "idle";
+      const createdAgent = await svc.create(companyId, {
+        id: draftAgentId,
+        ...normalizedHireInput,
+        status,
+        spentMonthlyCents: 0,
+        lastHeartbeatAt: null,
+      });
+      const agent = createdAgent;
+      agentPersisted = true;
 
-    let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
-    const actor = getActorInfo(req);
+      let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
+      const actor = getActorInfo(req);
 
-    if (requiresApproval) {
-      const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
-      const requestedAdapterConfig =
-        redactEventPayload(
-          (agent.adapterConfig ?? normalizedHireInput.adapterConfig) as Record<string, unknown>,
-        ) ?? {};
-      const requestedRuntimeConfig =
-        redactEventPayload(
-          (normalizedHireInput.runtimeConfig ?? agent.runtimeConfig) as Record<string, unknown>,
-        ) ?? {};
-      const requestedMetadata =
-        redactEventPayload(
-          ((normalizedHireInput.metadata ?? agent.metadata ?? {}) as Record<string, unknown>),
-        ) ?? {};
-      approval = await approvalsSvc.create(companyId, {
-        type: "hire_agent",
-        requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
-        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        status: "pending",
-        payload: {
-          name: normalizedHireInput.name,
-          role: normalizedHireInput.role,
-          title: normalizedHireInput.title ?? null,
-          icon: normalizedHireInput.icon ?? null,
-          reportsTo: normalizedHireInput.reportsTo ?? null,
-          capabilities: normalizedHireInput.capabilities ?? null,
-          adapterType: requestedAdapterType,
-          adapterConfig: requestedAdapterConfig,
-          runtimeConfig: requestedRuntimeConfig,
-          budgetMonthlyCents:
-            typeof normalizedHireInput.budgetMonthlyCents === "number"
-              ? normalizedHireInput.budgetMonthlyCents
-              : agent.budgetMonthlyCents,
-          desiredSkills: desiredSkillAssignment.desiredSkills,
-          metadata: requestedMetadata,
-          agentId: agent.id,
+      if (requiresApproval) {
+        const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
+        const requestedAdapterConfig =
+          redactEventPayload(
+            (agent.adapterConfig ?? normalizedHireInput.adapterConfig) as Record<string, unknown>,
+          ) ?? {};
+        const requestedRuntimeConfig =
+          redactEventPayload(
+            (normalizedHireInput.runtimeConfig ?? agent.runtimeConfig) as Record<string, unknown>,
+          ) ?? {};
+        const requestedMetadata =
+          redactEventPayload(
+            ((normalizedHireInput.metadata ?? agent.metadata ?? {}) as Record<string, unknown>),
+          ) ?? {};
+        approval = await approvalsSvc.create(companyId, {
+          type: "hire_agent",
           requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
-          requestedConfigurationSnapshot: {
+          requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+          status: "pending",
+          payload: {
+            name: normalizedHireInput.name,
+            role: normalizedHireInput.role,
+            title: normalizedHireInput.title ?? null,
+            icon: normalizedHireInput.icon ?? null,
+            reportsTo: normalizedHireInput.reportsTo ?? null,
+            capabilities: normalizedHireInput.capabilities ?? null,
             adapterType: requestedAdapterType,
             adapterConfig: requestedAdapterConfig,
             runtimeConfig: requestedRuntimeConfig,
+            budgetMonthlyCents:
+              typeof normalizedHireInput.budgetMonthlyCents === "number"
+                ? normalizedHireInput.budgetMonthlyCents
+                : agent.budgetMonthlyCents,
             desiredSkills: desiredSkillAssignment.desiredSkills,
+            metadata: requestedMetadata,
+            agentId: agent.id,
+            requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
+            requestedConfigurationSnapshot: {
+              adapterType: requestedAdapterType,
+              adapterConfig: requestedAdapterConfig,
+              runtimeConfig: requestedRuntimeConfig,
+              desiredSkills: desiredSkillAssignment.desiredSkills,
+            },
           },
-        },
-        decisionNote: null,
-        decidedByUserId: null,
-        decidedAt: null,
-        updatedAt: new Date(),
-      });
-
-      if (sourceIssueIds.length > 0) {
-        await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
-          agentId: actor.actorType === "agent" ? actor.actorId : null,
-          userId: actor.actorType === "user" ? actor.actorId : null,
+          decisionNote: null,
+          decidedByUserId: null,
+          decidedAt: null,
+          updatedAt: new Date(),
         });
+
+        if (sourceIssueIds.length > 0) {
+          await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
+            agentId: actor.actorType === "agent" ? actor.actorId : null,
+            userId: actor.actorType === "user" ? actor.actorId : null,
+          });
+        }
       }
-    }
 
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "agent.hire_created",
-      entityType: "agent",
-      entityId: agent.id,
-      details: {
-        name: agent.name,
-        role: agent.role,
-        requiresApproval,
-        approvalId: approval?.id ?? null,
-        issueIds: sourceIssueIds,
-        desiredSkills: desiredSkillAssignment.desiredSkills,
-      },
-    });
-
-    await applyDefaultAgentTaskAssignGrant(
-      companyId,
-      agent.id,
-      actor.actorType === "user" ? actor.actorId : null,
-    );
-
-    if (approval) {
       await logActivity(db, {
         companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
-        action: "approval.created",
-        entityType: "approval",
-        entityId: approval.id,
-        details: { type: approval.type, linkedAgentId: agent.id },
+        action: "agent.hire_created",
+        entityType: "agent",
+        entityId: agent.id,
+        details: {
+          name: agent.name,
+          role: agent.role,
+          requiresApproval,
+          approvalId: approval?.id ?? null,
+          issueIds: sourceIssueIds,
+          desiredSkills: desiredSkillAssignment.desiredSkills,
+        },
       });
-    }
 
-    res.status(201).json({ agent, approval });
+      await applyDefaultAgentTaskAssignGrant(
+        companyId,
+        agent.id,
+        actor.actorType === "user" ? actor.actorId : null,
+      );
+
+      if (approval) {
+        await logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "approval.created",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type, linkedAgentId: agent.id },
+        });
+      }
+
+      res.status(201).json({ agent, approval });
+    } finally {
+      if (!agentPersisted) {
+        await wipeAgentWorkspaceDir(draftAgentId);
+      }
+    }
   });
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
@@ -1554,62 +1588,73 @@ export function agentRoutes(db: Db) {
       normalizedAdapterConfig,
     );
     const draftAgentId = randomUUID();
-    const validatedDraftAgent = await validateAgentBootstrap({
-      id: draftAgentId,
-      companyId,
-      name: createInput.name,
-      role: createInput.role ?? "general",
-      adapterType: createInput.adapterType ?? "process",
-      adapterConfig: normalizedAdapterConfig,
-    });
-
-    const createdAgent = await svc.create(companyId, {
-      id: draftAgentId,
-      ...createInput,
-      adapterConfig: validatedDraftAgent.adapterConfig,
-      status: "idle",
-      spentMonthlyCents: 0,
-      lastHeartbeatAt: null,
-    });
-    const agent = createdAgent;
-
-    const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "agent.created",
-      entityType: "agent",
-      entityId: agent.id,
-      details: {
-        name: agent.name,
-        role: agent.role,
-        desiredSkills: desiredSkillAssignment.desiredSkills,
-      },
-    });
-
-    await applyDefaultAgentTaskAssignGrant(
-      companyId,
-      agent.id,
-      req.actor.type === "board" ? (req.actor.userId ?? null) : null,
-    );
-
-    if (agent.budgetMonthlyCents > 0) {
-      await budgets.upsertPolicy(
-        companyId,
+    let agentPersisted = false;
+    try {
+      const validatedDraftAgent = await validateAgentBootstrap(
         {
-          scopeType: "agent",
-          scopeId: agent.id,
-          amount: agent.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
+          id: draftAgentId,
+          companyId,
+          name: createInput.name,
+          role: createInput.role ?? "general",
+          adapterType: createInput.adapterType ?? "process",
+          adapterConfig: normalizedAdapterConfig,
         },
-        actor.actorType === "user" ? actor.actorId : null,
+        { ephemeralWorkspace: true },
       );
-    }
 
-    res.status(201).json(agent);
+      const createdAgent = await svc.create(companyId, {
+        id: draftAgentId,
+        ...createInput,
+        adapterConfig: validatedDraftAgent.adapterConfig,
+        status: "idle",
+        spentMonthlyCents: 0,
+        lastHeartbeatAt: null,
+      });
+      const agent = createdAgent;
+      agentPersisted = true;
+
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "agent.created",
+        entityType: "agent",
+        entityId: agent.id,
+        details: {
+          name: agent.name,
+          role: agent.role,
+          desiredSkills: desiredSkillAssignment.desiredSkills,
+        },
+      });
+
+      await applyDefaultAgentTaskAssignGrant(
+        companyId,
+        agent.id,
+        req.actor.type === "board" ? (req.actor.userId ?? null) : null,
+      );
+
+      if (agent.budgetMonthlyCents > 0) {
+        await budgets.upsertPolicy(
+          companyId,
+          {
+            scopeType: "agent",
+            scopeId: agent.id,
+            amount: agent.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+      }
+
+      res.status(201).json(agent);
+    } finally {
+      if (!agentPersisted) {
+        await wipeAgentWorkspaceDir(draftAgentId);
+      }
+    }
   });
 
   router.patch("/agents/:id/permissions", validate(updateAgentPermissionsSchema), async (req, res) => {
@@ -2308,8 +2353,8 @@ export function agentRoutes(db: Db) {
     const limitParam = req.query.limit as string | undefined;
     const limit =
       limitParam !== undefined && limitParam !== ""
-        ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200))
-        : 200;
+        ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 100))
+        : 100;
     const runs = await heartbeat.list(companyId, agentId, limit);
     res.json(runs);
   });

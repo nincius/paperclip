@@ -9,7 +9,11 @@ This is **separate** from `pnpm dev` / `pnpm dev:once` in a terminal. Only one p
 
 ## Repo template plist
 
-A checked-in example (edit paths if your clone or username differs):
+> **Warning — replace every placeholder before use.** The example [`contrib/macos-launchagent/io.paperclip.local.plist`](https://github.com/paperclip-ai/paperclip/blob/master/contrib/macos-launchagent/io.paperclip.local.plist) uses generic placeholders such as **`/ABSOLUTE/PATH/TO/paperclip-repo`**, **`/Users/USERNAME`** (for `HOME`, `PAPERCLIP_HOME`, and log paths), and the Homebrew **`node`** path where shown. **Substitute real paths** for your machine, clone location, Node install, and log locations. Double-check each entry, then copy to `~/Library/LaunchAgents/` and run `launchctl bootstrap`; a wrong path fails silently or loops crash-only restarts.
+>
+> **Checklist:** repo root · Node binary · `tsx` / CLI entry · working directory · stdout log path · stderr log path · any extra paths in `EnvironmentVariables` or `ProgramArguments`.
+
+A checked-in example:
 
 - `contrib/macos-launchagent/io.paperclip.local.plist`
 
@@ -20,7 +24,7 @@ The template sets recommended **environment variables** for a stable operator in
 | Variable | Purpose |
 |----------|---------|
 | `PAPERCLIP_MANAGED_BY_LAUNCHD=1` | Marks the process as the LaunchAgent service so [`scripts/kill-dev.sh`](https://github.com/paperclip-ai/paperclip/blob/master/scripts/kill-dev.sh) does **not** send SIGTERM to it. |
-| `PAPERCLIP_STRICT_LISTEN_PORT=1` | Exit on startup if the configured port (e.g. 3100) is busy instead of silently binding the next free port. |
+| `PAPERCLIP_STRICT_LISTEN_PORT=true` | Exit on startup if the configured port (e.g. 3100) is busy instead of silently binding the next free port (same boolean convention as other `PAPERCLIP_*` env flags: only the string `true` enables). |
 | `PAPERCLIP_UI_DEV_MIDDLEWARE=false` | Serve the built UI from static assets (`pnpm build`) instead of embedding Vite (lower memory; avoids typical dev middleware failures under launchd). |
 | `SERVE_UI=true` | Keep the board UI enabled (default, set explicitly for clarity). |
 | `NODE_OPTIONS=--max-old-space-size=8192` | Reduces out-of-memory risk during startup. |
@@ -68,7 +72,7 @@ A minimal plist shape:
   <key>PAPERCLIP_MANAGED_BY_LAUNCHD</key>
   <string>1</string>
   <key>PAPERCLIP_STRICT_LISTEN_PORT</key>
-  <string>1</string>
+  <string>true</string>
   <key>PAPERCLIP_UI_DEV_MIDDLEWARE</key>
   <string>false</string>
   <key>SERVE_UI</key>
@@ -119,7 +123,7 @@ Helper (repo root):
 ./scripts/print-launchagent-path-hint.sh
 ```
 
-This prints a suggested `PATH=...` line you can merge into the plist.
+This prints a suggested `PATH=...` line you can merge into the plist (plain value, suitable for plist XML — not shell-escaped).
 
 ## Stderr log vs current health
 
@@ -136,9 +140,10 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/io.paperclip.local.pli
 
 ## Operational notes
 
+- **Repo `.env` and embedded Postgres:** the server loads **`$PAPERCLIP_HOME/instances/<id>/.env`**, then (if different) **`<WorkingDirectory>/.env`**. A development **`DATABASE_URL`** in the clone’s `.env` is ignored when **`config.json`** says **`embedded-postgres`** (so LaunchAgent with **`WorkingDirectory`** at the monorepo root still uses embedded DB). For a real external database, set **`database.mode`** to **`postgres`** and **`database.connectionString`** (or point **`DATABASE_URL`** only in that setup).
 - The agent runs in **your login session**; logging out can stop GUI LaunchAgents depending on system settings.
 - Before the first load (or after pulling large changes), run **`pnpm build`** at the repo root so `plugin-sdk`, server, and **UI** artifacts exist (`ui/dist` or packaged `server/ui-dist`). With `PAPERCLIP_UI_DEV_MIDDLEWARE=false`, `paperclipai doctor` fails until static UI artifacts are present (monorepo). Otherwise `paperclipai run` can fail with missing `dist` modules or fall back to API-only mode.
-- Ensure **nothing else** is listening on the configured port (default **3100**) before bootstrap when using **`PAPERCLIP_STRICT_LISTEN_PORT=1`**; otherwise the process exits with a clear error instead of binding another port.
+- Ensure **nothing else** is listening on the configured port (default **3100**) before bootstrap when using **`PAPERCLIP_STRICT_LISTEN_PORT=true`**; otherwise the process exits with a clear error instead of binding another port.
 - If `paperclipai run` fails at boot, ensure the repo has been built (`pnpm build` / `paperclipai doctor`) so CLI dependencies resolve; see internal note `report/2026-03-30-launchd-startup-build-fix.md` for a historical example.
 - Heartbeat recovery (orphan local PIDs after restart) is described in [Runtime runbook](/guides/board-operator/runtime-runbook).
 

@@ -194,7 +194,7 @@ Invariant: at least one root `company` level goal per company.
 - `parent_id` uuid fk `issues.id` null
 - `title` text not null
 - `description` text null
-- `status` enum: `backlog | todo | claimed | in_progress | handoff_ready | technical_review | changes_requested | human_review | done | blocked | cancelled`
+- `status` enum: `backlog | todo | claimed | in_progress | handoff_ready | technical_review | human_review | changes_requested | blocked | done | cancelled`
 - `priority` enum: `critical | high | medium | low`
 - `assignee_agent_id` uuid fk `agents.id` null
 - `created_by_agent_id` uuid fk `agents.id` null
@@ -375,7 +375,7 @@ Allowed transitions:
 
 ## 8.2 Issue Status
 
-Allowed transitions:
+Allowed **single-step** transitions (see `ISSUE_STATUS_TRANSITIONS` in `packages/shared`; the server enforces these on `PATCH` / `svc.update` except where noted below):
 
 - `backlog -> todo | cancelled`
 - `todo -> claimed | blocked | cancelled`
@@ -383,10 +383,16 @@ Allowed transitions:
 - `in_progress -> handoff_ready | blocked | done | cancelled`
 - `handoff_ready -> in_progress | technical_review | blocked | cancelled`
 - `technical_review -> changes_requested | human_review | blocked | cancelled`
-- `changes_requested -> claimed | in_progress | blocked | cancelled`
-- `human_review -> changes_requested | blocked | done | cancelled`
-- `blocked -> todo | claimed | in_progress | cancelled`
+- `changes_requested -> in_progress | claimed | blocked | cancelled` (`in_progress` via checkout only; see below)
+- `human_review -> technical_review | changes_requested | blocked | done | cancelled`
+- `blocked -> in_progress | todo | claimed | cancelled` (`in_progress` via checkout only; see below)
 - terminal: `done`, `cancelled`
+
+**`handoff_ready`, `technical_review`, `human_review`, and `done`:** There is **no** unconditional single-step `handoff_ready -> done` or `technical_review -> done` in the table above. Normal completion goes through `human_review` (then `done`) when review policy requires it. When **approved technical review evidence** is already recorded, the issue routes may **`reconcileApprovedReviewLane`**: a single operator request toward `human_review` or `done` can be expanded into `handoff_ready -> technical_review -> human_review` (and optionally `-> done`) inside the server so “simple” closes still preserve the review lane audit trail. A bare `handoff_ready -> done` or `technical_review -> done` without that reconciliation still **fails** transition validation.
+
+**`changes_requested` and entering `in_progress`:** Do not treat `changes_requested -> in_progress` as a direct PATCH transition. **`in_progress` requires an assignee** and **atomic checkout**: use **`POST /api/issues/:id/checkout`** with `expectedStatuses` including `changes_requested` (same atomic checkout contract as for `todo` / `blocked`; see checkout / `checkout_run_id` / `execution_run_id` handling). After checkout, the issue is `in_progress`. The only **PATCH** path to `in_progress` without checkout is **`claimed -> in_progress`** (explicit claim already established assignee ownership).
+
+**`blocked -> in_progress`:** There is **no** direct PATCH `blocked -> in_progress`. Unblock into active work only via **`POST …/checkout`** (atomic checkout), which sets assignee + `in_progress` together and enforces the same concurrency rules as other checkout sources. This satisfies **`in_progress` requires assignee** and **atomic checkout**; if the issue has no assignee while `blocked`, the checkout request must supply a valid agent.
 
 Side effects:
 

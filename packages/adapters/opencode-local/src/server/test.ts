@@ -47,6 +47,61 @@ function normalizeEnv(input: unknown): Record<string, string> {
   return env;
 }
 
+async function runOpenCodeModelDiscovery(params: {
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  configuredModel: boolean;
+  checks: AdapterEnvironmentCheck[];
+}): Promise<void> {
+  const { command, cwd, env, configuredModel, checks } = params;
+  try {
+    const discovered = await discoverOpenCodeModels({ command, cwd, env });
+    if (discovered.length > 0) {
+      checks.push({
+        code: "opencode_models_discovered",
+        level: "info",
+        message: `Discovered ${discovered.length} model(s) from OpenCode providers.`,
+      });
+    } else if (configuredModel) {
+      checks.push({
+        code: "opencode_models_empty",
+        level: "error",
+        message: "OpenCode returned no models.",
+        hint: "Run `opencode models` and verify provider authentication.",
+      });
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (/ProviderModelNotFoundError/i.test(errMsg)) {
+      checks.push({
+        code: "opencode_hello_probe_model_unavailable",
+        level: "warn",
+        ...(configuredModel
+          ? {
+              message: "The configured model was not found by the provider.",
+              detail: errMsg,
+              hint: "Run `opencode models` and choose an available provider/model ID.",
+            }
+          : {
+              message: `No explicit provider/model ID is configured (configuredModel=${configuredModel}); the provider default or fallback model was unavailable: ${errMsg}`,
+              detail: errMsg,
+              hint: "Run `opencode models` and set a provider/model ID or choose an available default.",
+            }),
+      });
+    } else {
+      checks.push({
+        code: "opencode_models_discovery_failed",
+        level: configuredModel ? "error" : "warn",
+        message: configuredModel
+          ? errMsg || "OpenCode model discovery failed."
+          : errMsg || "OpenCode model discovery failed (best-effort, no model configured).",
+        hint: "Run `opencode models` manually to verify provider auth and config.",
+      });
+    }
+  }
+}
+
 const OPENCODE_AUTH_REQUIRED_RE =
   /(?:auth(?:entication)?\s+required|api\s*key|invalid\s*api\s*key|not\s+logged\s+in|opencode\s+auth\s+login|free\s+usage\s+exceeded)/i;
 
@@ -124,77 +179,18 @@ export async function testEnvironment(
   let modelValidationPassed = false;
   const configuredModel = asString(config.model, "").trim();
 
-  if (canRunProbe && configuredModel) {
-    try {
-      const discovered = await discoverOpenCodeModels({ command, cwd, env: runtimeEnv });
-      if (discovered.length > 0) {
-        checks.push({
-          code: "opencode_models_discovered",
-          level: "info",
-          message: `Discovered ${discovered.length} model(s) from OpenCode providers.`,
-        });
-      } else {
-        checks.push({
-          code: "opencode_models_empty",
-          level: "error",
-          message: "OpenCode returned no models.",
-          hint: "Run `opencode models` and verify provider authentication.",
-        });
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (/ProviderModelNotFoundError/i.test(errMsg)) {
-        checks.push({
-          code: "opencode_hello_probe_model_unavailable",
-          level: "warn",
-          message: "The configured model was not found by the provider.",
-          detail: errMsg,
-          hint: "Run `opencode models` and choose an available provider/model ID.",
-        });
-      } else {
-        checks.push({
-          code: "opencode_models_discovery_failed",
-          level: "error",
-          message: errMsg || "OpenCode model discovery failed.",
-          hint: "Run `opencode models` manually to verify provider auth and config.",
-        });
-      }
-    }
-  } else if (canRunProbe && !configuredModel) {
-    try {
-      const discovered = await discoverOpenCodeModels({ command, cwd, env: runtimeEnv });
-      if (discovered.length > 0) {
-        checks.push({
-          code: "opencode_models_discovered",
-          level: "info",
-          message: `Discovered ${discovered.length} model(s) from OpenCode providers.`,
-        });
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (/ProviderModelNotFoundError/i.test(errMsg)) {
-        checks.push({
-          code: "opencode_hello_probe_model_unavailable",
-          level: "warn",
-          message: "The configured model was not found by the provider.",
-          detail: errMsg,
-          hint: "Run `opencode models` and choose an available provider/model ID.",
-        });
-      } else {
-        checks.push({
-          code: "opencode_models_discovery_failed",
-          level: "warn",
-          message: errMsg || "OpenCode model discovery failed (best-effort, no model configured).",
-          hint: "Run `opencode models` manually to verify provider auth and config.",
-        });
-      }
-    }
+  if (canRunProbe) {
+    await runOpenCodeModelDiscovery({
+      command,
+      cwd,
+      env: runtimeEnv,
+      configuredModel: Boolean(configuredModel),
+      checks,
+    });
   }
 
-  const modelUnavailable = checks.some((check) => check.code === "opencode_hello_probe_model_unavailable");
-  if (!configuredModel && !modelUnavailable) {
-    // No model configured – skip model requirement if no model-related checks exist
-  } else if (configuredModel && canRunProbe) {
+  // Only validate a configured provider/model ID when one is set; discovery above may still warn without it.
+  if (configuredModel && canRunProbe) {
     try {
       await ensureOpenCodeModelConfiguredAndAvailable({
         model: configuredModel,
@@ -225,10 +221,9 @@ export async function testEnvironment(
       return asStringArray(config.args);
     })();
     const variant = asString(config.variant, "").trim();
-    const probeModel = configuredModel;
 
     const args = ["run", "--format", "json"];
-    args.push("--model", probeModel);
+    args.push("--model", configuredModel);
     if (variant) args.push("--variant", variant);
     if (extraArgs.length > 0) args.push(...extraArgs);
 

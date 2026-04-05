@@ -93,6 +93,10 @@ export function activityService(db: Db) {
         )
         .orderBy(desc(heartbeatRuns.createdAt));
 
+      if (rows.length === 0) {
+        return [];
+      }
+
       const effects = await loadHeartbeatRunOperationalEffects(db, rows.map((row) => row.runId));
       return rows.map((row) => ({
         ...row,

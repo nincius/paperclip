@@ -17,7 +17,7 @@ Files:
 
 Change:
 
-- Handoff comments that include an explicit head marker such as `Head atual: 10215239` are now upgraded to head-based diff identity.
+- Handoff comments that include an explicit head marker such as `Head: 10215239` are now upgraded to head-based diff identity.
 - This makes repeated handoffs for the same PR head reuse the existing review ticket instead of opening a new `technical_review_dispatch` issue.
 - The generated review description now includes the head SHA when available, making reconciliation easier to audit.
 
@@ -42,7 +42,7 @@ Change:
 Expected effect:
 
 - Fewer open/cancel/reopen loops for command resolution, bootstrap, timeout, and similar transient agent health findings.
-- Lower coordination noise for the `Coordenador`.
+- Lower coordination noise for the `Coordinator`.
 
 ### 3. Dashboard observability now exposes the churn that was prevented
 

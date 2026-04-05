@@ -105,7 +105,7 @@ launchctl load ~/Library/LaunchAgents/io.paperclip.local.plist
 
 ## "503" on deep links (e.g. `/TCN/agents/.../runs/...`) on localhost
 
-The UI ships a **service worker** ([`ui/public/sw.js`](ui/public/sw.js)) that, on **navigation** requests, returns a synthetic **`503` + "Offline"** when `fetch()` throws (network error). That is **not** necessarily an Express route returning 503: it often happens after a **brief disconnect** to `127.0.0.1` while the server restarts.
+The UI ships a **service worker** ([`ui/public/sw.js`](ui/public/sw.js)) that returns a synthetic **`503` + "Offline"** when `fetch()` throws (network error): for **navigations** it tries `caches.match("/")` first; for other **GET**s it tries `caches.match(request)`, then falls back to the same synthetic response so `respondWith` always receives a `Response`. That is **not** necessarily an Express route returning 503: it often happens after a **brief disconnect** to `127.0.0.1` while the server restarts.
 
 [`ui/src/main.tsx`](ui/src/main.tsx) **does not register** the service worker on loopback hosts and **unregisters** existing registrations there, so local dev avoids this pitfall. If you still see stale behaviour, hard-reload once or clear site data for the origin.
 

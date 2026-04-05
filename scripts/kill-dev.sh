@@ -22,9 +22,13 @@ fi
 is_launchagent_paperclip_service() {
   local pid="$1"
   local cmd
+  local re1 re_true
   cmd=$(ps wwwe -p "$pid" -o command= 2>/dev/null || true)
-  [[ "$cmd" == *"PAPERCLIP_MANAGED_BY_LAUNCHD=1"* ]] && return 0
-  [[ "$cmd" == *"PAPERCLIP_MANAGED_BY_LAUNCHD=true"* ]] && return 0
+  # Match exact boolean tokens (avoid false positives like =10, =100).
+  re1='(^|[[:space:]])PAPERCLIP_MANAGED_BY_LAUNCHD=1($|[[:space:]])'
+  re_true='(^|[[:space:]])PAPERCLIP_MANAGED_BY_LAUNCHD=true($|[[:space:]])'
+  [[ "$cmd" =~ $re1 ]] && return 0
+  [[ "$cmd" =~ $re_true ]] && return 0
   return 1
 }
 
@@ -63,7 +67,7 @@ echo ""
 
 for i in "${!pids[@]}"; do
   line="${lines[$i]}"
-  pid=$(echo "$line" | awk '{print $2}')
+  pid="${pids[$i]}"
   start=$(echo "$line" | awk '{print $9}')
   cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}')
   # Shorten the command for readability
@@ -80,7 +84,7 @@ fi
 
 echo "Sending SIGTERM..."
 for pid in "${pids[@]}"; do
-  kill "$pid" 2>/dev/null && echo "  killed $pid" || echo "  $pid already gone"
+  kill "$pid" 2>/dev/null && echo "  sent SIGTERM to $pid" || echo "  $pid already gone"
 done
 
 # Give processes a moment to exit, then SIGKILL any stragglers

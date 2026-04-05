@@ -1,0 +1,51 @@
+┌   paperclipai run 
+│
+│  Home: /Users/nincius/.paperclip
+│
+│  Instance: default
+│
+│  Config: /Users/nincius/.paperclip/instances/default/config.json
+│
+◇  Running doctor checks...
+
+██████╗  █████╗ ██████╗ ███████╗██████╗  ██████╗██╗     ██╗██████╗ 
+██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔════╝██║     ██║██╔══██╗
+██████╔╝███████║██████╔╝█████╗  ██████╔╝██║     ██║     ██║██████╔╝
+██╔═══╝ ██╔══██║██╔═══╝ ██╔══╝  ██╔══██╗██║     ██║     ██║██╔═══╝ 
+██║     ██║  ██║██║     ███████╗██║  ██║╚██████╗███████╗██║██║     
+╚═╝     ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝╚═╝     
+  ───────────────────────────────────────────────────────
+  Open-source orchestration for zero-human companies
+
+┌   paperclip doctor 
+│
+│  ✓ Config file: Valid config at /Users/nincius/.paperclip/instances/default/config.json
+│
+│  ✓ Deployment/auth mode: local_trusted mode is configured for loopback-only access
+│
+│  ✓ Agent JWT secret: PAPERCLIP_AGENT_JWT_SECRET is set in environment
+│
+│  ✓ Secrets adapter: Local encrypted provider configured with key file /Users/nincius/.paperclip/instances/default/secrets/master.key
+│
+│  ✓ Storage: Local disk storage is writable: /Users/nincius/.paperclip/instances/default/data/storage
+│
+│  ✓ Database: Embedded PostgreSQL configured at /Users/nincius/.paperclip/instances/default/db (port 54329)
+│
+│  ✓ LLM provider: No LLM provider configured (optional)
+│
+│  ✓ Log directory: Log directory is writable: /Users/nincius/.paperclip/instances/default/logs
+│
+│  ✓ Server port: Port 3100 is available
+│
+│  ✓ Static UI build: ui/dist or server/ui-dist present
+│
+◇  Summary ───╮
+│             │
+│  10 passed  │
+│             │
+├─────────────╯
+│
+└  All checks passed!
+
+│
+◇  Starting Paperclip server...

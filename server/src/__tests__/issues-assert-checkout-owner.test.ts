@@ -69,8 +69,12 @@ async function startTempDatabase() {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: () => {},
-    onError: () => {},
+    onLog: (msg) => {
+      console.log(msg);
+    },
+    onError: (err) => {
+      console.error(err);
+    },
   });
   await instance.initialise();
   await instance.start();
@@ -161,5 +165,71 @@ describe("issueService.assertCheckoutOwner", () => {
     const row = await db.select().from(issues).where(eq(issues.id, issueId)).then((r) => r[0] ?? null);
     expect(row?.checkoutRunId).toBe(runId);
     expect(row?.executionRunId).toBe(runId);
+  });
+
+  it("checkout clears stale execution_run_id on todo when the old run is terminal", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const newRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Co",
+      issuePrefix: "TST",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Executor",
+      role: "engineer",
+      status: "active",
+      adapterType: "opencode_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: staleRunId,
+      companyId,
+      agentId,
+      status: "failed",
+      invocationSource: "timer",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: newRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "on_demand",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Todo with stale execution lock",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: staleRunId,
+      issueNumber: 1,
+      identifier: "TST-1",
+    });
+
+    const checkedOut = await svc.checkout(issueId, agentId, ["todo", "claimed", "blocked", "changes_requested"], newRunId);
+    expect(checkedOut.status).toBe("in_progress");
+    expect(checkedOut.checkoutRunId).toBe(newRunId);
+    expect(checkedOut.executionRunId).toBe(newRunId);
+
+    const row = await db.select().from(issues).where(eq(issues.id, issueId)).then((r) => r[0] ?? null);
+    expect(row?.executionRunId).toBe(newRunId);
   });
 });

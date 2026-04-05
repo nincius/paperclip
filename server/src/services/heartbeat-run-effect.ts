@@ -222,6 +222,9 @@ export function summarizeHeartbeatRunOperationalEffect(rows: RunActivityRow[]): 
         break;
       }
 
+      // Intentional catch-all: unknown actions count as impactful so we do not under-report
+      // workspace mutations. New low-signal actions should be added to NOISE_ACTIONS instead,
+      // or this default may inflate operational counts.
       default:
         markSignal(effect, "otherMutations");
         impactful = true;
@@ -245,9 +248,6 @@ export async function loadHeartbeatRunOperationalEffects(
 ): Promise<Map<string, HeartbeatRunOperationalEffect>> {
   const uniqueRunIds = Array.from(new Set(runIds.filter((runId) => runId.trim().length > 0)));
   const effects = new Map<string, HeartbeatRunOperationalEffect>();
-  for (const runId of uniqueRunIds) {
-    effects.set(runId, createEmptyEffect());
-  }
   if (uniqueRunIds.length === 0) return effects;
 
   const rows = await db

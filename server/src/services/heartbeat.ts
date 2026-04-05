@@ -253,7 +253,7 @@ interface ParsedIssueAssigneeAdapterOverrides {
 
 export type ResolvedWorkspaceForRun = {
   cwd: string;
-  source: "project_primary" | "task_session" | "agent_home";
+  source: "project_primary" | "task_session" | "agent_home" | "adapter_config";
   projectId: string | null;
   workspaceId: string | null;
   repoUrl: string | null;
@@ -567,11 +567,11 @@ export function resolveRuntimeSessionLegacyFallback(input: {
   taskKey: string | null;
   resetTaskSession: boolean;
   adapterType: string;
-  legacySessionId: string | null;
+  legacySessionId: string | null | undefined;
 }): string | null {
   if (input.taskKey || input.resetTaskSession) return null;
   if (input.adapterType === "codex_local") return null;
-  return input.legacySessionId;
+  return input.legacySessionId ?? null;
 }
 
 export function shouldResetTaskSessionForWake(
@@ -1369,7 +1369,7 @@ export function heartbeatService(db: Db) {
         }
         return {
           cwd: adapterPreferredCwd,
-          source: "agent_home" as const,
+          source: "adapter_config" as const,
           projectId: resolvedProjectId,
           workspaceId: null,
           repoUrl: null,
@@ -1548,6 +1548,7 @@ export function heartbeatService(db: Db) {
     try {
       await execFile("git", ["rev-parse", "--show-toplevel"], {
         cwd: input.resolvedWorkspace.cwd,
+        timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
       });
     } catch {
       throw new HeartbeatSetupError(

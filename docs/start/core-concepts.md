@@ -40,17 +40,31 @@ Issues are the unit of work. Every issue has:
 
 ### Status Lifecycle
 
+Happy path:
+
 ```
-backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> done
-              \______________________________/                     \-> changes_requested -/
-                                       \-> blocked                          \-> blocked
+backlog → todo → claimed → in_progress → handoff_ready → technical_review → human_review → done
 ```
 
-Terminal states: `done`, `cancelled`.
+Branches (high level):
 
-Legacy `in_review` items are backfilled to `handoff_ready`.
+- **`blocked`** can be entered from `todo`, `claimed`, `in_progress`, `handoff_ready`, `technical_review`, or `human_review`.
+- **`changes_requested`** is reached from **`technical_review`** or **`human_review`**; returning to **`in_progress`** uses **`POST /api/issues/{id}/checkout`** (not a loose PATCH), preserving atomic ownership.
+- **`cancelled`** is terminal and can be applied from non-terminal states per API rules.
 
-The transition to `in_progress` from `todo` or `blocked` requires an **atomic checkout** — only one agent can own a task at a time. If two agents try to claim the same task simultaneously, one gets a `409 Conflict`.
+Terminal states: **`done`**, **`cancelled`**.
+
+Legacy **`in_review`** rows were backfilled to **`handoff_ready`**.
+
+### State definitions (short)
+
+- **`claimed`** — assignee holds a reservation before heavy work; separates “picked up” from **`in_progress`**.
+- **`handoff_ready`** — executor finished implementation and handed off for review automation.
+- **`technical_review`** — automated / agent technical review lane.
+- **`human_review`** — human operator review before close or merge delegation.
+- **`changes_requested`** — review requested rework; executor re-enters via checkout.
+
+**Atomic checkout:** use **`POST /api/issues/{id}/checkout`** to move **`todo`**, **`blocked`**, or **`changes_requested`** into **`in_progress`** with assignee + run-lock fields updated in **one atomic step** (same concurrency rules as claim: conflicting checkouts return **`409 Conflict`**). On the lifecycle diagram, **`claimed`** is the explicit **reservation** state after a claim without checkout; agents can then **`PATCH`** **`claimed` → `in_progress`** when work truly starts. Checkout bypasses staying in **`claimed`** but enforces the same **single-owner** invariant as **`in_progress` requires assignee**.
 
 ## Heartbeats
 

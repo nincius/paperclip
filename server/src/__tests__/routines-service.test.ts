@@ -326,13 +326,14 @@ describe("routine service live-execution coalescing", () => {
       projectId: routine.projectId,
       title: routine.title,
       description: routine.description,
-      status: "in_progress",
+      status: "claimed",
       priority: routine.priority,
       assigneeAgentId: routine.assigneeAgentId,
       originKind: "routine_execution",
       originId: routine.id,
       originRunId: previousRunId,
     });
+    await issueSvc.update(previousIssue.id, { status: "in_progress" });
 
     await db.insert(routineRuns).values({
       id: previousRunId,

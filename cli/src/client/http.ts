@@ -63,6 +63,8 @@ interface ApiClientOptions {
   apiKey?: string;
   runId?: string;
   recoverAuth?: (input: RecoverAuthInput) => Promise<string | null>;
+  /** Per-request fetch timeout in ms (AbortController). Default 30000. Timeouts are retried like connection errors when transient retry is enabled. */
+  requestTimeoutMs?: number;
   /** Set to `false` to disable transient retries. Default: bounded backoff on 502/503/504/429 and fetch network errors. */
   transientRetry?: false | TransientRetryOptions;
 }
@@ -72,6 +74,7 @@ export class PaperclipApiClient {
   apiKey?: string;
   readonly runId?: string;
   readonly recoverAuth?: (input: RecoverAuthInput) => Promise<string | null>;
+  private readonly requestTimeoutMs?: number;
   private readonly transientRetry: TransientRetryOptions | null;
 
   constructor(opts: ApiClientOptions) {
@@ -79,11 +82,13 @@ export class PaperclipApiClient {
     this.apiKey = opts.apiKey?.trim() || undefined;
     this.runId = opts.runId?.trim() || undefined;
     this.recoverAuth = opts.recoverAuth;
+    this.requestTimeoutMs = opts.requestTimeoutMs;
     if (opts.transientRetry === false) {
       this.transientRetry = null;
     } else {
       const merged = { ...DEFAULT_TRANSIENT_RETRY, ...opts.transientRetry };
       merged.maxAttempts = Math.max(1, merged.maxAttempts);
+      merged.backoffMultiplier = Math.max(1, merged.backoffMultiplier ?? 2);
       this.transientRetry = merged;
     }
   }
@@ -144,12 +149,17 @@ export class PaperclipApiClient {
       }
 
       let response: Response;
+      const timeoutMs = this.requestTimeoutMs ?? 30_000;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
         response = await fetch(url, {
           ...init,
           headers,
+          signal: controller.signal,
         });
       } catch (error) {
+        // Includes network failures and AbortError from request timeout (AbortController).
         if (!this.shouldRetryTransient(attempt, maxAttempts, "connection")) {
           throw new ApiConnectionError({
             apiBase: this.apiBase,
@@ -160,6 +170,8 @@ export class PaperclipApiClient {
         }
         await sleep(transientBackoffMs(this.transientRetry!, attempt));
         continue;
+      } finally {
+        clearTimeout(timeoutId);
       }
 
       if (opts?.ignoreNotFound && response.status === 404) {
@@ -180,7 +192,7 @@ export class PaperclipApiClient {
           }
         }
 
-        if (isTransientHttpStatus(response.status) && this.shouldRetryTransient(attempt, maxAttempts, response.status)) {
+        if (this.shouldRetryTransient(attempt, maxAttempts, response.status)) {
           const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
           await sleep(
             retryAfterMs ?? transientBackoffMs(this.transientRetry!, attempt),
@@ -316,7 +328,8 @@ function isTransientHttpStatus(status: number): boolean {
 }
 
 function transientBackoffMs(cfg: TransientRetryOptions, attemptIndex: number): number {
-  const mult = cfg.backoffMultiplier ?? 2;
+  // Clamp so exponential delay never shrinks (TransientRetryOptions.backoffMultiplier is normalized in the client constructor; this is a second line of defense).
+  const mult = Math.max(1, cfg.backoffMultiplier ?? 2);
   const cap = cfg.maxDelayMs ?? 12_000;
   const raw = cfg.initialDelayMs * mult ** attemptIndex;
   const capped = Math.min(cap, raw);

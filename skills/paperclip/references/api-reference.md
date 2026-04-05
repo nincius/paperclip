@@ -528,17 +528,41 @@ Then close or comment on linked issues to complete the workflow.
 
 ## Issue Lifecycle
 
-```
-backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> done
-              \______________________________/                     \-> changes_requested -/
-                                       \-> blocked                          \-> blocked
-```
+**Main flow (happy path):**
+
+`backlog` → `todo` → `claimed` → `in_progress` → `handoff_ready` → `technical_review` → `human_review` → `done`
+
+**`changes_requested` loops (executor returns to work, reviewer may re-enter review):**
+
+- `technical_review` → `changes_requested` → `claimed` (executor picks up again; `POST .../checkout` moves into `in_progress`) → … → `handoff_ready` → `technical_review` …
+- `human_review` → `changes_requested` → `technical_review` (reviewer-driven path) or toward executor states per `ISSUE_STATUS_TRANSITIONS`
+
+**`blocked` branches (from multiple lanes):**
+
+- `in_progress` → `blocked`
+- `technical_review` → `blocked`
+- `human_review` → `blocked`
+- `blocked` → `todo` or `claimed` when unblocked (see `ISSUE_STATUS_TRANSITIONS` in shared constants for the full graph)
 
 Terminal states: `done`, `cancelled`
 
+### State meanings and transition rules
+
+| State | Meaning |
+| ----- | -------- |
+| `claimed` | Reserved / claimed toward execution; treat like pre-work pickup (requires checkout before real execution). |
+| `in_progress` | Active executor work; **`started_at` is auto-set**; requires checkout / valid assignee semantics for work. |
+| `handoff_ready` | Executor finished and handed off for **review**; not the same as “human is actively reviewing.” |
+| `technical_review` | Reviewer/agent performing **technical** checks on the handoff. |
+| `human_review` | **Board / human review** in the lane; the API **only allows entering `human_review` from `technical_review`** (direct `in_progress` → `human_review` is rejected — use `handoff_ready` → `technical_review` first, or adjust assignees and comment). |
+| `changes_requested` | Reviewer requested revisions; work returns toward the executor (`changes_requested` → `claimed` / etc., then eventually `handoff_ready` again). |
+
+Legacy `in_review` in stored data is **backfilled to `handoff_ready`**. Treat those rows as **ready for review**: advance them into `technical_review` or `done` according to the real state of the work (do not assume review already happened).
+
+Other invariants:
+
 - `in_progress` requires an assignee (use checkout).
-- legacy `in_review` data is backfilled to `handoff_ready`
-- use `handoff_ready` for executor-to-review handoff; `human_review` is only valid after `technical_review`
+- Use `handoff_ready` for executor-to-review handoff.
 - `started_at` is auto-set on `in_progress`.
 - `completed_at` is auto-set on `done`.
 - One assignee per task at a time.
@@ -555,13 +579,13 @@ Terminal states: `done`, `cancelled`
 | 404  | Not found          | Entity doesn't exist or isn't in your company                        |
 | 409  | Conflict           | Another agent owns the task. Pick a different one. **Do not retry.** |
 | 422  | Semantic violation | Invalid state transition (e.g. `backlog` -> `done`)                  |
-| 429  | Rate limited       | Back off; honor `Retry-After` when present; few retries only.        |
+| 429  | Rate limited       | Back off; honor `Retry-After` when present; otherwise prefer **2–3 retries** with exponential delay (**cap ~30s**), then stop. |
 | 500  | Server error       | May be transient; do not tight-loop. Bounded backoff or note and continue. |
 | 502  | Bad gateway        | Often transient (proxy/upstream). Bounded backoff, then stop.        |
-| 503  | Service unavailable| API or proxy overloaded/down. Bounded exponential backoff (few attempts), then exit cleanly. |
+| 503  | Service unavailable| API or proxy overloaded/down. Bounded exponential backoff (**2–3 retries**, cap delay **~30s**), then exit cleanly. |
 | 504  | Gateway timeout    | Treat like 503 — bounded retries, then stop.                         |
 
-**Transient failures:** Never retry the same request in a tight loop. Use exponential backoff and a **small** max attempt count so heartbeats do not spam logs or freeze UIs. The `paperclipai` CLI retries 502/503/504/429 and connection errors automatically with backoff (configurable on the client).
+**Transient failures:** Never retry the same request in a tight loop. The **`paperclipai` CLI HTTP client** applies **CLI-only** automatic retries on **502/503/504/429**, connection errors, and fetch timeouts (defaults are on the order of **up to 4 attempts**, **~1s initial delay**, **2× backoff**, **~12s max delay** — see `cli/src/client/http.ts`). **Custom agents, adapters, and raw `curl` callers do not get those retries** unless they use that client; implement **your own** bounded exponential backoff (**2–3 retries**, **max delay ~30s**) or follow the heartbeat skill’s explicit 1s/2s/4s schedule.
 
 ---
 
@@ -650,4 +674,4 @@ Terminal states: `done`, `cancelled`
 | Ignore budget warnings                      | You'll be auto-paused at 100% mid-work                | Check spend at start; prioritize above 80%              |
 | @-mention agents for no reason              | Each mention triggers a budget-consuming heartbeat    | Only mention agents who need to act                     |
 | Sit silently on blocked work                | Nobody knows you're stuck; the task rots              | Comment the blocker and escalate immediately            |
-| Leave tasks in ambiguous states             | Others can't tell if work is progressing              | Always update status: `blocked`, `changes_requested`, `human_review`, or `done` |
+| Leave tasks in ambiguous states             | Others can't tell if work is progressing              | Always end heartbeats with a **non-ambiguous** status: use **`blocked`** if work cannot proceed; **`handoff_ready`** when the executor is done and waiting for pickup/review; **`human_review`** when the issue is **in the review lane** awaiting human/board action (distinct from `handoff_ready`, which signals *readiness* rather than “someone is reviewing”); **`changes_requested`** when a reviewer asked for revisions; **`done`** when fully complete. Related: **`in_progress`** means active execution — do not use `human_review` as a substitute for `handoff_ready`. |

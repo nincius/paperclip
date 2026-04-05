@@ -39,10 +39,7 @@ if (!isSameFile && existsSync(CWD_ENV_PATH)) {
 type DatabaseMode = "embedded-postgres" | "postgres";
 
 function parseStrictListenPortEnv(): boolean {
-  const raw = process.env.PAPERCLIP_STRICT_LISTEN_PORT;
-  if (raw === undefined || raw.trim() === "") return false;
-  const v = raw.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
+  return process.env.PAPERCLIP_STRICT_LISTEN_PORT === "true";
 }
 
 export interface Config {
@@ -229,7 +226,10 @@ export function loadConfig(): Config {
     authPublicBaseUrl,
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
-    databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
+    // Embedded mode must not inherit repo-root `.env` DATABASE_URL (common in monorepos); that URL is for
+    // external Postgres and would skip embedded startup. Use `database.mode: "postgres"` for external DB.
+    databaseUrl:
+      fileDatabaseMode === "postgres" ? process.env.DATABASE_URL ?? fileDbUrl : undefined,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),

@@ -69,6 +69,20 @@ async function main() {
     console.log("No matching codex_local / opencode_local agents (check PAPERCLIP_COMPANY_ID).");
   }
 
+  const filteredTargets = targets.filter((agent) => {
+    if (
+      agent.adapterType === "opencode_local" &&
+      typeof agent.adapterConfig?.model === "string" &&
+      agent.adapterConfig.model === model
+    ) {
+      return false;
+    }
+    if (!allAgents && managedAgentNemotronPreset(agent) === null) {
+      return false;
+    }
+    return true;
+  });
+
   for (const agent of targets) {
     const preset = managedAgentNemotronPreset(agent);
     const tag =
@@ -99,7 +113,7 @@ async function main() {
     const { patched, failures } = await applyManagedNemotronPatches({
       baseUrl,
       authHeaders: authHeaders(),
-      targets,
+      targets: filteredTargets,
       model,
     });
     console.log(`\nDone. Patched ${patched} agent(s). Run "Test environment" per agent.`);

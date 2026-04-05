@@ -66,7 +66,19 @@ async function main() {
     process.exit(1);
   }
 
-  const agentsRes = await fetch(`${baseUrl}/api/companies/${companyId}/agents`, { headers: authHeaders() });
+  let agentsRes;
+  try {
+    agentsRes = await fetch(`${baseUrl}/api/companies/${companyId}/agents`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (err) {
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      console.error("GET agents: request aborted (10s timeout or cancellation).");
+      process.exit(1);
+    }
+    throw err;
+  }
   if (!agentsRes.ok) {
     console.error(`GET agents -> ${agentsRes.status}`, (await agentsRes.text()).slice(0, 400));
     process.exit(1);
@@ -77,10 +89,19 @@ async function main() {
     process.exit(1);
   }
 
-  const runsRes = await fetch(
-    `${baseUrl}/api/companies/${companyId}/heartbeat-runs?limit=${runsLimit}`,
-    { headers: authHeaders() },
-  );
+  let runsRes;
+  try {
+    runsRes = await fetch(
+      `${baseUrl}/api/companies/${companyId}/heartbeat-runs?limit=${runsLimit}`,
+      { headers: authHeaders(), signal: AbortSignal.timeout(10000) },
+    );
+  } catch (err) {
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      console.error("GET heartbeat-runs: request aborted (10s timeout or cancellation).");
+      process.exit(1);
+    }
+    throw err;
+  }
   if (!runsRes.ok) {
     console.error(`GET heartbeat-runs -> ${runsRes.status}`, (await runsRes.text()).slice(0, 400));
     process.exit(1);

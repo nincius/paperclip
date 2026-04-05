@@ -1,8 +1,25 @@
-import express from "express";
+import express, { type Request } from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
+import { createIssueRoutesTestDeps } from "./helpers/issue-routes-test-deps.js";
+
+type TestBoardActor = {
+  type: "board";
+  userId: string;
+  companyIds: string[];
+  source: string;
+  isInstanceAdmin: boolean;
+};
+
+const testBoardActor: TestBoardActor = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+};
 
 const childIssueId = "11111111-1111-4111-8111-111111111111";
 const parentIssueId = "22222222-2222-4222-8222-222222222222";
@@ -58,19 +75,14 @@ vi.mock("../services/index.js", () => ({
 }));
 
 function createApp() {
+  const { db, storage } = createIssueRoutesTestDeps();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as Request & { actor: TestBoardActor }).actor = testBoardActor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(db, storage));
   app.use(errorHandler);
   return app;
 }
@@ -142,6 +154,9 @@ function makePrimaryPullRequestProduct(overrides: Record<string, unknown> = {}) 
 describe("issue review outcome reconciliation routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIssueService.getById.mockReset();
+    mockIssueService.update.mockReset();
+    mockIssueService.listComments.mockReset();
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.list.mockResolvedValue([]);
     mockIssueService.listComments.mockResolvedValue([]);
@@ -379,6 +394,7 @@ describe("issue review outcome reconciliation routes", () => {
       });
 
     expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledTimes(2);
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -498,28 +514,17 @@ describe("issue review outcome reconciliation routes", () => {
       .mockResolvedValueOnce(updatedChild)
       .mockResolvedValueOnce({ ...parent, status: "technical_review" });
     mockWorkProductService.listForIssue.mockResolvedValue([
-      {
+      makePrimaryPullRequestProduct({
         id: "wp-draft-1",
-        issueId: parentIssueId,
-        companyId: "company-1",
-        projectId: null,
-        executionWorkspaceId: null,
-        runtimeServiceId: null,
-        type: "pull_request",
-        provider: "github",
         externalId: "321",
-        title: "PR #321",
         url: "https://github.com/acme/app/pull/321",
+        title: "PR #321",
         status: "draft",
         reviewState: "none",
-        isPrimary: true,
-        healthStatus: "healthy",
-        summary: null,
         metadata: { draft: true },
-        createdByRunId: null,
         createdAt: new Date("2026-04-01T00:00:00.000Z"),
         updatedAt: new Date("2026-04-01T00:05:00.000Z"),
-      },
+      }),
     ]);
 
     const res = await request(createApp())
@@ -655,5 +660,134 @@ Nenhum.`,
       [parentIssueId, { status: "human_review" }],
     ]);
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("test_blocking_review_malformed_summary: vague closing comment does not move parent; emits unparsed activity", async () => {
+    const existingChild = makeReviewIssue("technical_review");
+    const updatedChild = makeReviewIssue("done");
+    const parent = makeParentIssue("handoff_ready");
+
+    mockIssueService.getById
+      .mockResolvedValueOnce(existingChild)
+      .mockResolvedValueOnce(parent);
+    mockIssueService.update.mockResolvedValueOnce(updatedChild);
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${childIssueId}`)
+      .send({
+        status: "done",
+        comment: "Looks good! Ship it.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update.mock.calls).toEqual([[childIssueId, { status: "done" }]]);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.review_outcome_unparsed",
+        entityId: childIssueId,
+        details: expect.objectContaining({
+          parentIssueId,
+          reason: "no_classified_outcome",
+        }),
+      }),
+    );
+    expect(
+      mockLogActivity.mock.calls.some(
+        (c) => c[1]?.action === "issue.review_outcome_reconciled",
+      ),
+    ).toBe(false);
+  });
+
+  it("test_nonblocking_review_missing_format_markers: PT summary without markers or approval phrases is unparsed", async () => {
+    const existingChild = makeReviewIssue("technical_review");
+    const updatedChild = makeReviewIssue("done");
+    const parent = makeParentIssue("handoff_ready");
+
+    mockIssueService.getById
+      .mockResolvedValueOnce(existingChild)
+      .mockResolvedValueOnce(parent);
+    mockIssueService.update.mockResolvedValueOnce(updatedChild);
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${childIssueId}`)
+      .send({
+        status: "done",
+        comment: `## Revisao tecnica concluida
+Sem findings bloqueantes nesta rodada.`,
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update.mock.calls).toEqual([[childIssueId, { status: "done" }]]);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.review_outcome_unparsed", entityId: childIssueId }),
+    );
+  });
+
+  it("test_review_ambiguous_phrases: conflicting signals yield no parent transition", async () => {
+    const existingChild = makeReviewIssue("technical_review");
+    const updatedChild = makeReviewIssue("done");
+    const parent = makeParentIssue("handoff_ready");
+
+    mockIssueService.getById
+      .mockResolvedValueOnce(existingChild)
+      .mockResolvedValueOnce(parent);
+    mockIssueService.update.mockResolvedValueOnce(updatedChild);
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${childIssueId}`)
+      .send({
+        status: "done",
+        comment: `### Findings bloqueantes
+1. Bug critico.
+
+Pode seguir para revisao humana.`,
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update.mock.calls).toEqual([[childIssueId, { status: "done" }]]);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.review_outcome_unparsed", entityId: childIssueId }),
+    );
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("test_parent_in_unexpected_state: parent already done skips reconciliation without unparsed when comment is valid", async () => {
+    const existingChild = makeReviewIssue("technical_review");
+    const updatedChild = makeReviewIssue("done");
+    const parentDone = makeParentIssue("done");
+
+    mockIssueService.getById
+      .mockResolvedValueOnce(existingChild)
+      .mockResolvedValueOnce(parentDone);
+    mockIssueService.update.mockResolvedValueOnce(updatedChild);
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${childIssueId}`)
+      .send({
+        status: "done",
+        comment: `## Revisao tecnica concluida
+
+### Findings bloqueantes
+- Nenhum.
+
+### Decisao operacional
+- [PAP-700](/PAP/issues/PAP-700) pode seguir para revisao humana final/merge.`,
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update.mock.calls).toEqual([[childIssueId, { status: "done" }]]);
+    expect(
+      mockLogActivity.mock.calls.some(
+        (c) => c[1]?.action === "issue.review_outcome_unparsed",
+      ),
+    ).toBe(false);
+    expect(
+      mockLogActivity.mock.calls.some(
+        (c) => c[1]?.action === "issue.review_outcome_reconciled",
+      ),
+    ).toBe(false);
   });
 });

@@ -108,9 +108,12 @@ describe("agent health monitor", () => {
   });
 
   afterAll(async () => {
-    await instance?.stop();
-    if (dataDir) {
-      fs.rmSync(dataDir, { recursive: true, force: true });
+    try {
+      await instance?.stop();
+    } finally {
+      if (dataDir) {
+        await fs.promises.rm(dataDir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -221,6 +224,140 @@ describe("agent health monitor", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, resolvedIssue!.id));
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("Closing the alert automatically.");
+  });
+
+  it("does not flag heartbeat_stalled while a heartbeat run is still running", async () => {
+    const { companyId, workerId } = await seedCompany();
+    const monitor = agentHealthMonitorService(db, {
+      adapterEnvironmentIntervalMs: Number.MAX_SAFE_INTEGER,
+      heartbeatStaleMinMs: 30_000,
+      heartbeatStaleMultiplier: 1,
+      queueStarvationMs: 24 * 60 * 60 * 1000,
+    });
+
+    await db
+      .update(agents)
+      .set({
+        lastHeartbeatAt: new Date("2026-03-29T18:00:00.000Z"),
+        runtimeConfig: { heartbeat: { enabled: true, intervalSec: 60 } },
+      })
+      .where(eq(agents.id, workerId));
+
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: workerId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      startedAt: new Date("2026-03-29T18:02:00.000Z"),
+      createdAt: new Date("2026-03-29T18:01:00.000Z"),
+      updatedAt: new Date("2026-03-29T18:02:00.000Z"),
+      contextSnapshot: {},
+    });
+
+    await monitor.tick(new Date("2026-03-29T18:05:00.000Z"));
+
+    const alerts = await db.select().from(issues).where(eq(issues.originKind, "agent_health_alert"));
+    const stalled = alerts.filter((a) => a.title.includes("missed expected heartbeats"));
+    expect(stalled).toHaveLength(0);
+  });
+
+  it("flags heartbeat_stalled when idle beyond threshold with no running run", async () => {
+    const { companyId, workerId, ceoId } = await seedCompany();
+    const monitor = agentHealthMonitorService(db, {
+      adapterEnvironmentIntervalMs: Number.MAX_SAFE_INTEGER,
+      heartbeatStaleMinMs: 30_000,
+      heartbeatStaleMultiplier: 1,
+      queueStarvationMs: 24 * 60 * 60 * 1000,
+    });
+
+    await db
+      .update(agents)
+      .set({
+        lastHeartbeatAt: new Date("2026-03-29T18:00:00.000Z"),
+        runtimeConfig: { heartbeat: { enabled: true, intervalSec: 60 } },
+      })
+      .where(eq(agents.id, workerId));
+
+    await monitor.tick(new Date("2026-03-29T18:05:00.000Z"));
+
+    const alerts = await db.select().from(issues).where(eq(issues.originKind, "agent_health_alert"));
+    const stalled = alerts.filter((a) => a.title.includes("missed expected heartbeats"));
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]?.assigneeAgentId).toBe(ceoId);
+  });
+
+  it("suppresses rapid reopen of the same agent health alert after transient recovery", async () => {
+    const { companyId, workerId } = await seedCompany();
+    const base = new Date();
+    const firstQueuedAt = new Date(base.getTime() - 10 * 60 * 1000);
+    const firstTickAt = new Date(base.getTime() - 5 * 60 * 1000);
+    const resolvedAt = new Date(base.getTime() - 4 * 60 * 1000);
+    const secondQueuedAt = new Date(base.getTime() - 3 * 60 * 1000);
+    const suppressedAt = new Date(base.getTime() - 2 * 60 * 1000);
+    const reopenedAt = new Date(base.getTime() + 31 * 60 * 1000);
+    const monitor = agentHealthMonitorService(db, {
+      adapterEnvironmentIntervalMs: Number.MAX_SAFE_INTEGER,
+      queueStarvationMs: 60_000,
+      alertReopenCooldownMs: 30 * 60 * 1000,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: workerId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      createdAt: firstQueuedAt,
+      updatedAt: firstQueuedAt,
+      contextSnapshot: {},
+    });
+
+    const firstTick = await monitor.tick(firstTickAt);
+    expect(firstTick.created).toBe(1);
+
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.agentId, workerId));
+    const resolvedTick = await monitor.tick(resolvedAt);
+    expect(resolvedTick.resolved).toBe(1);
+
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: workerId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      createdAt: secondQueuedAt,
+      updatedAt: secondQueuedAt,
+      contextSnapshot: {},
+    });
+
+    const suppressedTick = await monitor.tick(suppressedAt);
+    expect(suppressedTick.created).toBe(0);
+    expect(suppressedTick.updated).toBe(0);
+
+    const [stillCancelled] = await db.select().from(issues).where(eq(issues.originKind, "agent_health_alert"));
+    expect(stillCancelled?.status).toBe("cancelled");
+
+    const suppressionEvents = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.health_alert_reopen_suppressed"));
+    expect(suppressionEvents).toHaveLength(1);
+    expect(suppressionEvents[0]?.entityId).toBe(stillCancelled?.id);
+    expect(suppressionEvents[0]?.details).toMatchObject({
+      originId: `agent:${workerId}:health:queued_without_consumer`,
+      reason: "recent_auto_resolve_cooldown",
+    });
+
+    const reopenedTick = await monitor.tick(reopenedAt);
+    expect(reopenedTick.created).toBe(0);
+    expect(reopenedTick.updated).toBe(1);
+
+    const [reopenedIssue] = await db.select().from(issues).where(eq(issues.originKind, "agent_health_alert"));
+    expect(reopenedIssue?.status).toBe("todo");
   });
 
   it("creates and resolves a technical-review WIP alert", async () => {

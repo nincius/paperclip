@@ -4,8 +4,27 @@ import { fileURLToPath } from "node:url";
 import type { PaperclipConfig } from "../config/schema.js";
 import type { CheckResult } from "./index.js";
 
+/** Marker file at the Paperclip monorepo root (preferred over a fixed `../..` depth). */
+const MONOREPO_ROOT_MARKER = "pnpm-workspace.yaml";
+
 export function monorepoRootFromCliPackage(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+  const startDir = path.dirname(fileURLToPath(import.meta.url));
+  let dir = startDir;
+  const { root } = path.parse(dir);
+
+  while (true) {
+    if (fs.existsSync(path.join(dir, MONOREPO_ROOT_MARKER))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir || dir === root) {
+      throw new Error(
+        `[paperclip] Could not resolve monorepo root: no "${MONOREPO_ROOT_MARKER}" found when walking upward from ${startDir}. ` +
+          "Run the CLI from a full Paperclip repository checkout.",
+      );
+    }
+    dir = parent;
+  }
 }
 
 function hasStaticUiArtifacts(repoRoot: string): boolean {

@@ -6,4 +6,4 @@
 set -euo pipefail
 
 echo "# Suggested PATH for ~/Library/LaunchAgents/io.paperclip.local.plist (merge with Homebrew):"
-printf 'PATH=%q\n' "${PATH}"
+printf 'PATH=%s\n' "${PATH}"

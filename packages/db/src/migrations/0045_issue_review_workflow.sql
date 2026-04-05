@@ -4,10 +4,7 @@ set "status" = 'handoff_ready',
 where "status" = 'in_review';
 --> statement-breakpoint
 
-drop index if exists "issues_open_routine_execution_uq";
---> statement-breakpoint
-
-create unique index "issues_open_routine_execution_uq"
+create unique index concurrently "tmp_issues_open_routine_execution_uq"
   on "issues" ("company_id", "origin_kind", "origin_id")
   where "origin_kind" = 'routine_execution'
     and "origin_id" is not null
@@ -24,3 +21,9 @@ create unique index "issues_open_routine_execution_uq"
       'human_review',
       'blocked'
     );
+--> statement-breakpoint
+
+drop index concurrently if exists "issues_open_routine_execution_uq";
+--> statement-breakpoint
+
+alter index "tmp_issues_open_routine_execution_uq" rename to "issues_open_routine_execution_uq";

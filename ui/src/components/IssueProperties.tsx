@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link } from "@/lib/router";
 import type { Issue } from "@paperclipai/shared";
@@ -51,7 +51,7 @@ function defaultExecutionWorkspaceModeForProject(project: { executionWorkspacePo
 
 function issueModeForExistingWorkspace(mode: string | null | undefined) {
   if (mode === "isolated_workspace" || mode === "operator_branch" || mode === "shared_workspace") return mode;
-  if (mode === "adapter_managed" || mode === "cloud_sandbox") return "agent_default";
+  if (mode === "adapter_managed" || mode === "cloud_sandbox") return "shared_workspace";
   return "shared_workspace";
 }
 
@@ -64,6 +64,35 @@ function shouldPresentExistingWorkspaceSelection(issue: Issue) {
     issue.executionWorkspaceId &&
     (persistedMode === "isolated_workspace" || persistedMode === "operator_branch"),
   );
+}
+
+type ExecutionWorkspaceSelectValue = (typeof EXECUTION_WORKSPACE_OPTIONS)[number]["value"];
+
+function normalizeExecutionWorkspaceSelection(
+  issue: Issue,
+  project: Parameters<typeof defaultExecutionWorkspaceModeForProject>[0],
+): ExecutionWorkspaceSelectValue {
+  if (shouldPresentExistingWorkspaceSelection(issue)) return "reuse_existing";
+  const raw =
+    issue.executionWorkspacePreference
+    ?? issue.executionWorkspaceSettings?.mode
+    ?? defaultExecutionWorkspaceModeForProject(project);
+  if (raw === "reuse_existing") return "reuse_existing";
+  if (raw === "isolated_workspace") return "isolated_workspace";
+  if (raw === "operator_branch") return "isolated_workspace";
+  if (raw === "shared_workspace" || raw === "inherit" || raw === "agent_default") return "shared_workspace";
+  return "shared_workspace";
+}
+
+function reusableWorkspaceLastUsedTimeMs(value: string | Date | null | undefined): number {
+  if (value == null) return 0;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isNaN(t) ? 0 : t;
+  }
+  if (value === "") return 0;
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? 0 : t;
 }
 
 interface IssuePropertiesProps {
@@ -167,6 +196,12 @@ function CopyableValue({ value, label, mono, className }: { value: string; label
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     } catch { /* noop */ }
   }, [value]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== undefined) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   return (
     <div className={cn("flex items-start gap-1 group", className)}>
@@ -301,7 +336,9 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
     for (const ws of workspaces) {
       const key = ws.cwd ?? ws.id;
       const existing = seen.get(key);
-      if (!existing || new Date(ws.lastUsedAt) > new Date(existing.lastUsedAt)) {
+      const wsT = reusableWorkspaceLastUsedTimeMs(ws.lastUsedAt);
+      const exT = reusableWorkspaceLastUsedTimeMs(existing?.lastUsedAt);
+      if (!existing || wsT > exT) {
         seen.set(key, ws);
       }
     }
@@ -311,13 +348,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
     deduplicatedReusableWorkspaces.find((workspace) => workspace.id === issue.executionWorkspaceId)
     ?? issue.currentExecutionWorkspace
     ?? null;
-  const currentExecutionWorkspaceSelection = shouldPresentExistingWorkspaceSelection(issue)
-    ? "reuse_existing"
-    : (
-        issue.executionWorkspacePreference
-        ?? issue.executionWorkspaceSettings?.mode
-        ?? defaultExecutionWorkspaceModeForProject(currentProject)
-      );
+  const normalizedExecutionWorkspaceSelection = normalizeExecutionWorkspaceSelection(issue, currentProject);
   const projectLink = (id: string | null) => {
     if (!id) return null;
     const project = projects?.find((p) => p.id === id) ?? null;
@@ -658,7 +689,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
           <PropertyRow label="Acts now">
             <IssueCurrentOwnerBadge
               issue={issue}
-              agentName={(id) => agentName(id)}
+              agentName={agentName}
               currentUserId={currentUserId}
               showRole={false}
               className="max-w-full"
@@ -692,9 +723,9 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
             <div className="w-full space-y-2">
               <select
                 className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
-                value={currentExecutionWorkspaceSelection}
+                value={normalizedExecutionWorkspaceSelection}
                 onChange={(e) => {
-                  const nextMode = e.target.value;
+                  const nextMode = e.target.value as ExecutionWorkspaceSelectValue;
                   onUpdate({
                     executionWorkspacePreference: nextMode,
                     executionWorkspaceId: nextMode === "reuse_existing" ? issue.executionWorkspaceId : null,
@@ -716,25 +747,35 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
                 ))}
               </select>
 
-              {currentExecutionWorkspaceSelection === "reuse_existing" && (
+              {normalizedExecutionWorkspaceSelection === "reuse_existing" && (
                 <select
                   className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
                   value={issue.executionWorkspaceId ?? ""}
                   onChange={(e) => {
-                    const nextExecutionWorkspaceId = e.target.value || null;
+                    const raw = e.target.value;
+                    if (!raw) {
+                      onUpdate({
+                        executionWorkspacePreference: "isolated_workspace",
+                        executionWorkspaceId: null,
+                        executionWorkspaceSettings: { mode: "isolated_workspace" },
+                      });
+                      return;
+                    }
                     const nextExecutionWorkspace = deduplicatedReusableWorkspaces.find(
-                      (workspace) => workspace.id === nextExecutionWorkspaceId,
+                      (workspace) => workspace.id === raw,
                     );
                     onUpdate({
                       executionWorkspacePreference: "reuse_existing",
-                      executionWorkspaceId: nextExecutionWorkspaceId,
+                      executionWorkspaceId: raw,
                       executionWorkspaceSettings: {
                         mode: issueModeForExistingWorkspace(nextExecutionWorkspace?.mode),
                       },
                     });
                   }}
                 >
-                  <option value="">Choose an existing workspace</option>
+                  <option value="" disabled hidden>
+                    Choose an existing workspace
+                  </option>
                   {deduplicatedReusableWorkspaces.map((workspace) => (
                     <option key={workspace.id} value={workspace.id}>
                       {workspace.name} · {workspace.status} · {workspace.branchName ?? workspace.cwd ?? workspace.id.slice(0, 8)}

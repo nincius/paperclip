@@ -27,11 +27,11 @@ const TECH_QUEUE_STATUSES = new Set<IssueStatus>([
   "changes_requested",
 ]);
 
+/** Substrings matched against `issue.originId` for `agent_health_alert` issues (broader tokens first is fine). */
 const ADAPTER_ALERT_MARKERS = [
   ":health:unknown_adapter",
   ":health:runtime_adapter_divergence",
   ":health:environment_",
-  ":health:environment_resolution_failed",
 ] as const;
 
 export interface DashboardObservabilityAgentRow {
@@ -68,7 +68,8 @@ export interface DashboardObservabilityData {
   visibleStatuses: IssueStatus[];
   agentRows: DashboardObservabilityAgentRow[];
   technicalQueue: Issue[];
-  stalledIssues: Issue[];
+  /** Open issues sorted by `updatedAt` ascending (oldest activity first). */
+  openIssuesByUpdateTime: Issue[];
   adapterAlerts: Issue[];
 }
 
@@ -84,8 +85,9 @@ function isOpenIssue(issue: Issue): boolean {
 
 function isAdapterAlertIssue(issue: Issue): boolean {
   if (issue.originKind !== "agent_health_alert") return false;
-  if (typeof issue.originId !== "string") return false;
-  return ADAPTER_ALERT_MARKERS.some((marker) => issue.originId?.includes(marker));
+  const originId = issue.originId;
+  if (typeof originId !== "string") return false;
+  return ADAPTER_ALERT_MARKERS.some((marker) => originId.includes(marker));
 }
 
 function parseAgentIdFromOrigin(originId: string | null | undefined): string | null {
@@ -123,7 +125,9 @@ export function deriveDashboardObservability(input: {
   const technicalQueue = openIssues
     .filter((issue) => TECH_QUEUE_STATUSES.has(issue.status))
     .sort((left, right) => compareByDateAsc(left.updatedAt, right.updatedAt));
-  const stalledIssues = [...openIssues].sort((left, right) => compareByDateAsc(left.updatedAt, right.updatedAt));
+  const openIssuesByUpdateTime = [...openIssues].sort((left, right) =>
+    compareByDateAsc(left.updatedAt, right.updatedAt),
+  );
   const adapterAlerts = openIssues
     .filter(isAdapterAlertIssue)
     .sort((left, right) => compareByDateDesc(left.updatedAt, right.updatedAt));
@@ -257,7 +261,7 @@ export function deriveDashboardObservability(input: {
     visibleStatuses,
     agentRows,
     technicalQueue,
-    stalledIssues,
+    openIssuesByUpdateTime,
     adapterAlerts,
   };
 }

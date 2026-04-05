@@ -60,26 +60,71 @@ async function getAvailablePort(): Promise<number> {
 
 async function startTempDatabase() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-issues-service-"));
-  const port = await getAvailablePort();
-  const EmbeddedPostgres = await getEmbeddedPostgresCtor();
-  const instance = new EmbeddedPostgres({
-    databaseDir: dataDir,
-    user: "paperclip",
-    password: "paperclip",
-    port,
-    persistent: true,
-    initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: () => {},
-    onError: () => {},
-  });
-  await instance.initialise();
-  await instance.start();
+  let instance: EmbeddedPostgresInstance | null = null;
+  try {
+    const port = await getAvailablePort();
+    const EmbeddedPostgres = await getEmbeddedPostgresCtor();
+    instance = new EmbeddedPostgres({
+      databaseDir: dataDir,
+      user: "paperclip",
+      password: "paperclip",
+      port,
+      persistent: true,
+      initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+      onLog: (msg) => {
+        console.log(msg);
+      },
+      onError: (err) => {
+        console.error(err);
+      },
+    });
+    await instance.initialise();
+    await instance.start();
 
-  const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
-  await ensurePostgresDatabase(adminConnectionString, "paperclip");
-  const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
-  await applyPendingMigrations(connectionString);
-  return { connectionString, dataDir, instance };
+    const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    await ensurePostgresDatabase(adminConnectionString, "paperclip");
+    const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    await applyPendingMigrations(connectionString);
+    return { connectionString, dataDir, instance };
+  } catch (err) {
+    try {
+      await instance?.stop();
+    } catch {
+      /* ignore stop errors during failed startup */
+    }
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      /* ignore cleanup errors */
+    }
+    throw err;
+  }
+}
+
+const START_TEMP_DB_MAX_ATTEMPTS = 5;
+
+async function startTempDatabaseWithRetries() {
+  let lastError: unknown;
+  let delayMs = 50;
+  for (let attempt = 0; attempt < START_TEMP_DB_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await startTempDatabase();
+    } catch (err) {
+      lastError = err;
+      if (attempt < START_TEMP_DB_MAX_ATTEMPTS - 1) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        delayMs = Math.min(delayMs * 2, 800);
+      }
+    }
+  }
+  const msg =
+    lastError instanceof Error
+      ? lastError.message
+      : String(lastError);
+  throw new Error(
+    `startTempDatabase failed after ${START_TEMP_DB_MAX_ATTEMPTS} attempts (getAvailablePort + embedded Postgres bind); last error: ${msg}`,
+    { cause: lastError },
+  );
 }
 
 describe("issueService.list participantAgentId", () => {
@@ -89,7 +134,7 @@ describe("issueService.list participantAgentId", () => {
   let dataDir = "";
 
   beforeAll(async () => {
-    const started = await startTempDatabase();
+    const started = await startTempDatabaseWithRetries();
     db = createDb(started.connectionString);
     svc = issueService(db);
     instance = started.instance;
@@ -105,9 +150,18 @@ describe("issueService.list participantAgentId", () => {
   });
 
   afterAll(async () => {
-    await instance?.stop();
-    if (dataDir) {
-      fs.rmSync(dataDir, { recursive: true, force: true });
+    let stopError: unknown;
+    try {
+      await instance?.stop();
+    } catch (err) {
+      stopError = err;
+    } finally {
+      if (dataDir) {
+        fs.rmSync(dataDir, { recursive: true, force: true });
+      }
+    }
+    if (stopError !== undefined) {
+      throw stopError;
     }
   });
 
@@ -451,6 +505,30 @@ describe("issueService.list participantAgentId", () => {
     ).rejects.toThrow(
       "Invalid issue status transition: in_progress -> human_review. Move the issue into handoff_ready first; Paperclip advances technical_review -> human_review after technical review is complete.",
     );
+  });
+
+  it("allows human_review issues to move back to technical_review", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Return from human review",
+      status: "human_review",
+      priority: "medium",
+    });
+
+    const updated = await svc.update(issueId, { status: "technical_review" });
+
+    expect(updated?.status).toBe("technical_review");
   });
 
   it("allows reopening a cancelled issue back to todo", async () => {

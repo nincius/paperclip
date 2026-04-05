@@ -213,7 +213,9 @@ export function IssuesList({
   const normalizedIssueSearch = debouncedIssueSearch.trim();
 
   useEffect(() => {
-    setIssueSearch(initialSearch ?? "");
+    const next = initialSearch ?? "";
+    setIssueSearch(next);
+    setDebouncedIssueSearch(next);
   }, [initialSearch]);
 
   useEffect(() => {

@@ -337,6 +337,20 @@
       "when": 1774900000000,
       "tag": "0047_company_technical_reviewer_reference",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1774910000000,
+      "tag": "0048_issue_open_status_partial_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1775000000000,
+      "tag": "0049_issues_agent_health_historical_lookup_idx",
+      "breakpoints": true
     }
   ]
 }

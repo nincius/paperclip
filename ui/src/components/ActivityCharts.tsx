@@ -250,7 +250,7 @@ export function OperationalEffectChart({ runs }: { runs: HeartbeatRun[] }) {
               title={`${day}: ${entry.effect} effect / ${entry.finished} finished`}
             >
               {entry.finished > 0 || entry.effect > 0 ? (
-                <div className="relative" style={{ height: `${Math.max(finishedHeightPct, effectHeightPct)}%`, minHeight: 2 }}>
+                <div className="relative h-full w-full" style={{ minHeight: 2 }}>
                   {entry.finished > 0 && (
                     <div
                       className="absolute inset-x-0 bottom-0 rounded-sm bg-sky-500/35"
@@ -273,7 +273,7 @@ export function OperationalEffectChart({ runs }: { runs: HeartbeatRun[] }) {
       </div>
       <DateLabels days={days} />
       <ChartLegend items={[
-        { color: "rgba(14,165,233,0.5)", label: "Finished" },
+        { color: "rgba(14,165,233,0.35)", label: "Finished" },
         { color: "#10b981", label: "Produced effect" },
       ]} />
     </div>

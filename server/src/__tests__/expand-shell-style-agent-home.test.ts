@@ -8,10 +8,21 @@ describe("expandShellStyleAgentHome", () => {
     );
   });
 
+  it("replaces every $AGENT_HOME occurrence and handles path edges", () => {
+    expect(
+      expandShellStyleAgentHome("$AGENT_HOME/a and $AGENT_HOME/b", "/tmp/agent"),
+    ).toBe("/tmp/agent/a and /tmp/agent/b");
+    expect(expandShellStyleAgentHome("$AGENT_HOME/file", "/tmp/agent")).toBe("/tmp/agent/file");
+    expect(expandShellStyleAgentHome("$AGENT_HOME", "/tmp/agent")).toBe("/tmp/agent");
+    expect(expandShellStyleAgentHome("$AGENT_HOME/file", "/tmp/agent/")).toBe("/tmp/agent/file");
+  });
+
   it("is a no-op without agent home", () => {
     const s = "See $AGENT_HOME/x";
     expect(expandShellStyleAgentHome(s, null)).toBe(s);
     expect(expandShellStyleAgentHome(s, "")).toBe(s);
     expect(expandShellStyleAgentHome(s, "   ")).toBe(s);
+    expect(expandShellStyleAgentHome("", null)).toBe("");
+    expect(expandShellStyleAgentHome("", "   ")).toBe("");
   });
 });

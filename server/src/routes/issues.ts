@@ -42,6 +42,8 @@ import { REVIEW_DISPATCH_ORIGIN_KIND, reviewDispatchService } from "../services/
 import { classifyTechnicalReviewOutcome } from "../services/technical-review-outcome.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+/** Cap parallel `listComments` calls when scanning many technical-review child issues. */
+const MAX_TECHNICAL_REVIEW_CHILDREN_COMMENT_FETCH = 25;
 
 export function issueRoutes(db: Db, storage: StorageService) {
   const router = Router();
@@ -177,11 +179,45 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const childIssues = await svc.list(sourceIssue.companyId, { parentId: sourceIssue.id });
     const reviewChildren = childIssues
       .filter((child) => isTechnicalReviewChildIssueCandidate(child) && child.status === "done");
-    for (const child of reviewChildren) {
-      const childComments = await svc.listComments(child.id, {
-        order: "desc",
-        limit: 10,
-      });
+    const cappedReviewChildren = reviewChildren.slice(0, MAX_TECHNICAL_REVIEW_CHILDREN_COMMENT_FETCH);
+    if (reviewChildren.length > cappedReviewChildren.length) {
+      logger.warn(
+        {
+          parentIssueId: sourceIssue.id,
+          totalReviewChildren: reviewChildren.length,
+          cap: MAX_TECHNICAL_REVIEW_CHILDREN_COMMENT_FETCH,
+        },
+        "technical review signal scan capped parallel child comment fetches",
+      );
+    }
+    const childCommentResults = await Promise.allSettled(
+      cappedReviewChildren.map((child) =>
+        svc.listComments(child.id, {
+          order: "desc",
+          limit: 10,
+        })),
+    );
+    const childCommentLists: Awaited<ReturnType<typeof svc.listComments>>[] = [];
+    for (let i = 0; i < childCommentResults.length; i++) {
+      const settled = childCommentResults[i];
+      const child = cappedReviewChildren[i];
+      if (settled.status === "fulfilled") {
+        childCommentLists.push(settled.value);
+        continue;
+      }
+      logger.warn(
+        {
+          err: settled.reason,
+          parentIssueId: sourceIssue.id,
+          childIssueId: child.id,
+        },
+        "technical review signal scan: failed to list comments for review child",
+      );
+      childCommentLists.push([]);
+    }
+    for (let i = 0; i < cappedReviewChildren.length; i++) {
+      const child = cappedReviewChildren[i];
+      const childComments = childCommentLists[i];
       for (const comment of childComments) {
         const outcome = classifyTechnicalReviewOutcome(comment.body);
         if (!outcome) continue;
@@ -279,7 +315,32 @@ export function issueRoutes(db: Db, storage: StorageService) {
       reviewIssueAfter.id,
       input.commentBody,
     );
-    if (!outcome) return null;
+    if (!outcome) {
+      logger.warn(
+        {
+          reviewIssueId: reviewIssueAfter.id,
+          reviewIssueIdentifier: reviewIssueAfter.identifier,
+          parentIssueId: reviewIssueBefore.parentId ?? null,
+        },
+        "technical review child closed but outcome text did not classify; parent issue left unchanged for manual follow-up",
+      );
+      await logActivity(db, {
+        companyId: reviewIssueAfter.companyId,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId,
+        agentId: input.actor.agentId,
+        runId: input.actor.runId,
+        action: "issue.review_outcome_unparsed",
+        entityType: "issue",
+        entityId: reviewIssueAfter.id,
+        details: {
+          parentIssueId: reviewIssueBefore.parentId ?? null,
+          reviewIssueIdentifier: reviewIssueAfter.identifier,
+          reason: "no_classified_outcome",
+        },
+      });
+      return null;
+    }
     if (!reviewIssueBefore.parentId) return null;
 
     const parent = await svc.getById(reviewIssueBefore.parentId);
@@ -425,7 +486,20 @@ export function issueRoutes(db: Db, storage: StorageService) {
         reviewOutcome: "blocking",
       },
     });
-    if (!resumedRun) return null;
+    if (!resumedRun) {
+      logger.warn(
+        {
+          parentIssueId: parent.id,
+          assigneeAgentId: parent.assigneeAgentId,
+          reviewIssueId: reviewIssueAfter.id,
+          wakeReason: "issue_status_changed",
+          mutation: "review_blocking_findings",
+          detail: "heartbeat.wakeup returned null",
+        },
+        "review outcome blocking path: wake did not resume a run",
+      );
+      return null;
+    }
 
     const checkedOut = await svc.checkout(
       parent.id,
@@ -433,7 +507,21 @@ export function issueRoutes(db: Db, storage: StorageService) {
       [parent.status],
       resumedRun.id,
     );
-    if (!checkedOut) return null;
+    if (!checkedOut) {
+      logger.warn(
+        {
+          parentIssueId: parent.id,
+          assigneeAgentId: parent.assigneeAgentId,
+          reviewIssueId: reviewIssueAfter.id,
+          wakeReason: "issue_status_changed",
+          mutation: "review_blocking_findings",
+          resumedRunId: resumedRun.id,
+          detail: "svc.checkout returned null",
+        },
+        "review outcome blocking path: checkout failed after wake",
+      );
+      return null;
+    }
 
     await routinesSvc.syncRunStatusForIssue(checkedOut.id);
     await logActivity(db, {
@@ -461,70 +549,167 @@ export function issueRoutes(db: Db, storage: StorageService) {
     workProduct: IssueWorkProduct;
     actor: ReturnType<typeof getActorInfo>;
   }) {
-    const issue = await svc.getById(input.issueId);
-    if (!issue) return null;
-    if (issue.status === "done" || issue.status === "cancelled") return issue;
+    const issuePreview = await svc.getById(input.issueId);
+    if (!issuePreview) return null;
+    if (issuePreview.status === "done" || issuePreview.status === "cancelled") return issuePreview;
 
-    const transitions: string[] = [];
-    let current = issue;
+    try {
+      const { current, transitions, cancelledChildIds, completedMergeReconcile } = await db.transaction(
+        async (tx) => {
+          const scopedIssues = issueService(tx as unknown as Db);
+          const issue = await scopedIssues.getById(input.issueId);
+          if (!issue) {
+            return {
+              current: null as Awaited<ReturnType<typeof svc.getById>>,
+              transitions: [] as string[],
+              cancelledChildIds: [] as string[],
+              completedMergeReconcile: false,
+            };
+          }
+          if (issue.status === "done" || issue.status === "cancelled") {
+            return {
+              current: issue,
+              transitions: [] as string[],
+              cancelledChildIds: [] as string[],
+              completedMergeReconcile: false,
+            };
+          }
 
-    if (current.status === "handoff_ready") {
-      const next = await svc.update(current.id, { status: "technical_review" });
-      if (!next) return current;
-      current = next;
-      transitions.push("handoff_ready->technical_review");
+          const transitions: string[] = [];
+          let current = issue;
+
+          if (current.status === "handoff_ready") {
+            const next = await scopedIssues.update(current.id, { status: "technical_review" });
+            if (!next) {
+              return { current, transitions, cancelledChildIds: [], completedMergeReconcile: false };
+            }
+            current = next;
+            transitions.push("handoff_ready->technical_review");
+          }
+
+          if (current.status === "technical_review") {
+            const next = await scopedIssues.update(current.id, { status: "human_review" });
+            if (!next) {
+              return { current, transitions, cancelledChildIds: [], completedMergeReconcile: false };
+            }
+            current = next;
+            transitions.push("technical_review->human_review");
+          }
+
+          if (current.status === "human_review") {
+            const next = await scopedIssues.update(current.id, { status: "done" });
+            if (!next) {
+              return { current, transitions, cancelledChildIds: [], completedMergeReconcile: false };
+            }
+            current = next;
+            transitions.push("human_review->done");
+          }
+
+          if (transitions.length === 0 || current.status !== "done") {
+            return { current, transitions, cancelledChildIds: [], completedMergeReconcile: false };
+          }
+
+          const childIssues = await scopedIssues.list(current.companyId, { parentId: current.id });
+          const openReviewChildren = childIssues.filter((child) =>
+            isTechnicalReviewChildIssueCandidate(child)
+            && child.status !== "done"
+            && child.status !== "cancelled",
+          );
+
+          const cancelledChildIds: string[] = [];
+          for (const child of openReviewChildren) {
+            try {
+              const updated = await scopedIssues.update(child.id, { status: "cancelled" });
+              if (!updated) {
+                logger.warn(
+                  { childIssueId: child.id, parentIssueId: current.id },
+                  "merge reconcile: cancel review child returned no row",
+                );
+                continue;
+              }
+              cancelledChildIds.push(child.id);
+            } catch (err) {
+              logger.warn(
+                { err, childIssueId: child.id, parentIssueId: current.id },
+                "merge reconcile: failed to cancel review child issue",
+              );
+            }
+          }
+
+          return { current, transitions, cancelledChildIds, completedMergeReconcile: true };
+        },
+      );
+
+      if (!current) return null;
+
+      if (!completedMergeReconcile) {
+        return current;
+      }
+
+      try {
+        await routinesSvc.syncRunStatusForIssue(current.id);
+      } catch (err) {
+        logger.warn(
+          { err, issueId: current.id, workProductId: input.workProduct.id },
+          "routine sync failed after PR merge auto-complete (parent)",
+        );
+      }
+      for (const childId of cancelledChildIds) {
+        try {
+          await routinesSvc.syncRunStatusForIssue(childId);
+        } catch (err) {
+          logger.warn(
+            { err, issueId: current.id, childIssueId: childId, workProductId: input.workProduct.id },
+            "routine sync failed after PR merge auto-complete child cancel",
+          );
+        }
+      }
+
+      await logActivity(db, {
+        companyId: current.companyId,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId,
+        agentId: input.actor.agentId,
+        runId: input.actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: current.id,
+        details: {
+          status: "done",
+          identifier: current.identifier,
+          source: "work_product",
+          autoCompletedFromPullRequest: true,
+          workProductId: input.workProduct.id,
+          workProductStatus: input.workProduct.status,
+          transitions,
+          cancelledChildIssueIds: cancelledChildIds,
+        },
+      });
+
+      logger.info(
+        {
+          event: "issue.pr_merge_auto_complete",
+          issueId: current.id,
+          workProductId: input.workProduct.id,
+          transitions,
+          cancelledChildIssueCount: cancelledChildIds.length,
+          cancelledChildIssueIds: cancelledChildIds,
+        },
+        "PR merge auto-complete committed",
+      );
+
+      return current;
+    } catch (err) {
+      logger.warn(
+        {
+          err,
+          issueId: input.issueId,
+          workProductId: input.workProduct.id,
+        },
+        "PR merge auto-complete transaction failed",
+      );
+      throw err;
     }
-
-    if (current.status === "technical_review") {
-      const next = await svc.update(current.id, { status: "human_review" });
-      if (!next) return current;
-      current = next;
-      transitions.push("technical_review->human_review");
-    }
-
-    if (current.status === "human_review") {
-      const next = await svc.update(current.id, { status: "done" });
-      if (!next) return current;
-      current = next;
-      transitions.push("human_review->done");
-    }
-
-    if (transitions.length === 0 || current.status !== "done") return current;
-
-    await routinesSvc.syncRunStatusForIssue(current.id);
-
-    const childIssues = await svc.list(current.companyId, { parentId: current.id });
-    const openReviewChildren = childIssues.filter((child) =>
-      isTechnicalReviewChildIssueCandidate(child)
-      && child.status !== "done"
-      && child.status !== "cancelled",
-    );
-    for (const child of openReviewChildren) {
-      await svc.update(child.id, { status: "cancelled" });
-      await routinesSvc.syncRunStatusForIssue(child.id);
-    }
-
-    await logActivity(db, {
-      companyId: current.companyId,
-      actorType: input.actor.actorType,
-      actorId: input.actor.actorId,
-      agentId: input.actor.agentId,
-      runId: input.actor.runId,
-      action: "issue.updated",
-      entityType: "issue",
-      entityId: current.id,
-      details: {
-        status: "done",
-        identifier: current.identifier,
-        source: "work_product",
-        autoCompletedFromPullRequest: true,
-        workProductId: input.workProduct.id,
-        workProductStatus: input.workProduct.status,
-        transitions,
-      },
-    });
-
-    return current;
   }
 
   async function reconcileDraftPullRequestIssue(input: {
@@ -1390,7 +1575,27 @@ export function issueRoutes(db: Db, storage: StorageService) {
           targetStatus: updateFields.status,
         });
       }
-      issue = reviewLaneReconciliation?.issue ?? await svc.update(id, updateFields);
+      const patchAfterReconciliation =
+        reviewLaneReconciliation?.deferredHumanReviewBecausePullRequestDraft
+          ? Object.fromEntries(
+              Object.entries(updateFields).filter(([key]) => key !== "status"),
+            ) as typeof updateFields
+          : updateFields;
+      let patchToApply: typeof updateFields = { ...patchAfterReconciliation };
+      if (reviewLaneReconciliation?.deferredHumanReviewBecausePullRequestDraft) {
+        patchToApply = {
+          ...patchToApply,
+          status: reviewLaneReconciliation.issue.status,
+        };
+      }
+      if (Object.keys(patchToApply).length === 0) {
+        issue = reviewLaneReconciliation?.issue ?? (await svc.getById(id));
+      } else {
+        // Always persist the merged patch after lane reconciliation so user-supplied fields
+        // (title, description, priority, etc.) are never dropped when a no-op shortcut would
+        // match the reconciled row only on a subset of columns.
+        issue = await svc.update(id, patchToApply);
+      }
     } catch (err) {
       if (err instanceof HttpError && err.status === 422) {
         logger.warn(

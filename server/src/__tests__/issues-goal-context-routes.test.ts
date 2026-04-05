@@ -6,6 +6,7 @@ import { errorHandler } from "../middleware/index.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdentifier: vi.fn(),
   getAncestors: vi.fn(),
   findMentionedProjectIds: vi.fn(),
   getCommentCursor: vi.fn(),
@@ -106,6 +107,7 @@ const projectGoal = {
 describe("issue goal context routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.getById.mockResolvedValue(legacyProjectLinkedIssue);
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.findMentionedProjectIds.mockResolvedValue([]);
@@ -183,5 +185,30 @@ describe("issue goal context routes", () => {
       }),
     );
     expect(mockGoalService.getDefaultCompanyGoal).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for unknown PREFIX-NUM issue identifiers instead of failing UUID queries", async () => {
+    const res = await request(createApp()).get("/api/issues/TCN-999999");
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
+    expect(mockIssueService.getById).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for malformed issue ids", async () => {
+    const res = await request(createApp()).get("/api/issues/not-a-uuid");
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
+    expect(mockIssueService.getById).not.toHaveBeenCalled();
+  });
+
+  it("resolves human-readable identifiers before loading the issue", async () => {
+    mockIssueService.getByIdentifier.mockResolvedValue(legacyProjectLinkedIssue);
+    const res = await request(createApp()).get("/api/issues/PAP-581");
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.getByIdentifier).toHaveBeenCalledWith("PAP-581");
+    expect(mockIssueService.getById).toHaveBeenCalledWith(legacyProjectLinkedIssue.id);
   });
 });

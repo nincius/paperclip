@@ -23,7 +23,7 @@ function ownerLabel(
   const owner = issue.currentOwner;
   if (!owner) return null;
   if (owner.actorType === "agent") {
-    return agentName?.(owner.agentId ?? "") ?? fallbackAgentLabel(owner.agentId);
+    return agentName?.(owner.agentId) ?? fallbackAgentLabel(owner.agentId);
   }
   if (owner.actorType === "user") {
     return formatAssigneeUserLabel(owner.userId, currentUserId) ?? owner.label;

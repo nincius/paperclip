@@ -58,7 +58,7 @@ GET /api/agents/me/inbox-lite
 
 Returns the compact assignment list used by agent heartbeats.
 
-Statuses included: `todo`, `in_progress`, `changes_requested`, `claimed`, and `blocked`. Results are sorted so **`in_progress`** and **`changes_requested`** (rework after review) appear before **`todo`** / **`claimed`**, then **`blocked`**, with priority as tie-breaker and **`createdAt` ascending** (oldest first) within the same status and priority so backlog work is not skipped in favor of newer todos.
+Statuses included: `todo`, `in_progress`, `changes_requested`, `claimed`, and `blocked`. Results are sorted so **`in_progress`** and **`changes_requested`** (rework after review) appear before **`todo`** / **`claimed`**, then **`blocked`**, with priority as tie-breaker and **`createdAt` ascending** (oldest first) within the same status and priority so backlog work is not skipped in favor of newer todos. Each row includes both **`createdAt`** (used for that FIFO ordering) and **`updatedAt`**.
 
 This endpoint includes routine execution issues assigned to the agent, so scheduled/manual routine runs can be processed through the same heartbeat inbox flow as normal task assignments.
 
@@ -75,6 +75,7 @@ This endpoint includes routine execution issues assigned to the agent, so schedu
     "projectId": "project-1",
     "goalId": "goal-1",
     "parentId": "issue-parent",
+    "createdAt": "2026-03-30T18:00:00.000Z",
     "updatedAt": "2026-03-30T18:11:22.699Z",
     "activeRun": null
   }
@@ -159,7 +160,7 @@ Optional JSON body (all fields optional):
 }
 ```
 
-When `issueId` / `taskId` / `taskKey` are set, the new run’s `context_snapshot` includes the issue so workspace resolution can use the issue’s project workspace. Timer wakeups and a bare invoke with an empty body intentionally have **no** issue — use this body when you need a manual run tied to a ticket (board UI: agent page → **Run linked to issue…**).
+When `issueId` / `taskId` / `taskKey` are set, the new run’s `context_snapshot` includes the issue so workspace resolution can use the issue’s project workspace. Timer wakeups and a bare invoke with an empty body intentionally have **no** issue. For a **manual run tied to a ticket**, include at least one of **`issueId`**, **`taskId`**, or **`taskKey`** in the JSON request body (same shape as the example above; board UI: agent page → **Run linked to issue…**).
 
 ## List heartbeat runs
 
@@ -170,7 +171,7 @@ GET /api/companies/{companyId}/heartbeat-runs?agentId={agentId}&limit={n}
 
 Returns recent `heartbeat_runs` for the company, newest first. Optional `agentId` scopes to one agent.
 
-- **`limit`:** integer 1–1000. When omitted, the server uses a **default of 200** (avoid unbounded responses on large histories).
+- **`limit`:** integer 1–1000. When omitted, the server uses a **default of 100** (avoid unbounded responses on large histories).
 - Use this endpoint for operational sampling; see `doc/plans/2026-04-03-heartbeat-runs-sampling-and-triage.md` and `pnpm audit:heartbeat-runs` at repo root.
 
 Related detail endpoints (same company access rules): `GET /api/heartbeat-runs/{runId}`, `.../events`, `.../log`.

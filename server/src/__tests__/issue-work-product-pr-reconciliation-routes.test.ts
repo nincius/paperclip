@@ -1,7 +1,24 @@
-import express from "express";
+import express, { type Request } from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
+import { createIssueRoutesTestDeps } from "./helpers/issue-routes-test-deps.js";
+
+type TestBoardActor = {
+  type: "board";
+  userId: string;
+  companyIds: string[];
+  source: string;
+  isInstanceAdmin: boolean;
+};
+
+const testBoardActor: TestBoardActor = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+};
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -43,19 +60,14 @@ vi.mock("../services/index.js", () => ({
 }));
 
 function createApp() {
+  const { db, storage } = createIssueRoutesTestDeps();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as Request & { actor: TestBoardActor }).actor = testBoardActor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(db, storage));
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(err?.status ?? 500).json({
       error: err?.message ?? "Internal server error",
@@ -65,6 +77,11 @@ function createApp() {
 }
 
 describe("issue work product PR reconciliation routes", () => {
+  /** Realistic UUID ids: `router.param("id")` treats non-UUID tokens like `wp-1` as issue identifiers. */
+  const wpMerged = "a0000000-0000-4000-8000-000000000001";
+  const wpClosed = "a0000000-0000-4000-8000-000000000002";
+  const wpDraft = "a0000000-0000-4000-8000-000000000003";
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.getByIdentifier.mockResolvedValue(null);
@@ -94,7 +111,7 @@ describe("issue work product PR reconciliation routes", () => {
       originKind: "technical_review_dispatch",
     };
     const product = {
-      id: "wp-1",
+      id: wpMerged,
       issueId: "issue-1",
       companyId: "company-1",
       projectId: null,
@@ -131,10 +148,14 @@ describe("issue work product PR reconciliation routes", () => {
       .mockResolvedValueOnce({ ...reviewChild, status: "cancelled" });
 
     const res = await request(createApp())
-      .patch("/api/work-products/wp-1")
+      .patch(`/api/work-products/${wpMerged}`)
       .send({ status: "merged", reviewState: "approved", metadata: { merged: true } });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ parentId: "issue-1" }),
+    );
     expect(mockIssueService.update.mock.calls).toEqual([
       ["issue-1", { status: "technical_review" }],
       ["issue-1", { status: "human_review" }],
@@ -148,8 +169,9 @@ describe("issue work product PR reconciliation routes", () => {
         entityId: "issue-1",
         details: expect.objectContaining({
           autoCompletedFromPullRequest: true,
-          workProductId: "wp-1",
+          workProductId: wpMerged,
           workProductStatus: "merged",
+          cancelledChildIssueIds: ["issue-review-1"],
           transitions: [
             "handoff_ready->technical_review",
             "technical_review->human_review",
@@ -162,7 +184,7 @@ describe("issue work product PR reconciliation routes", () => {
 
   it("does not auto-complete when a PR is closed without merge evidence", async () => {
     const product = {
-      id: "wp-2",
+      id: wpClosed,
       issueId: "issue-2",
       companyId: "company-1",
       projectId: null,
@@ -188,12 +210,18 @@ describe("issue work product PR reconciliation routes", () => {
     mockWorkProductService.update.mockResolvedValue(product);
 
     const res = await request(createApp())
-      .patch("/api/work-products/wp-2")
+      .patch(`/api/work-products/${wpClosed}`)
       .send({ status: "closed", metadata: { merged: false } });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockIssueService.getById).not.toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        details: expect.objectContaining({ autoCompletedFromPullRequest: true }),
+      }),
+    );
   });
 
   it("returns a human review issue to technical_review when the PR becomes draft again", async () => {
@@ -208,7 +236,7 @@ describe("issue work product PR reconciliation routes", () => {
       assigneeUserId: null,
     };
     const draftProduct = {
-      id: "wp-3",
+      id: wpDraft,
       issueId: "issue-3",
       companyId: "company-1",
       projectId: null,
@@ -240,7 +268,7 @@ describe("issue work product PR reconciliation routes", () => {
     mockIssueService.update.mockResolvedValueOnce({ ...sourceIssue, status: "technical_review" });
 
     const res = await request(createApp())
-      .patch("/api/work-products/wp-3")
+      .patch(`/api/work-products/${wpDraft}`)
       .send({ status: "draft", metadata: { draft: true } });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -254,7 +282,7 @@ describe("issue work product PR reconciliation routes", () => {
         entityId: "issue-3",
         details: expect.objectContaining({
           resolvedFromPullRequestDraft: true,
-          workProductId: "wp-3",
+          workProductId: wpDraft,
           workProductStatus: "draft",
           statusTransitionPath: ["human_review->technical_review"],
         }),

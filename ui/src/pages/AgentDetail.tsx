@@ -52,6 +52,21 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
   MoreHorizontal,
   CheckCircle2,
   XCircle,
@@ -545,10 +560,14 @@ export function AgentDetail() {
   const { closePanel } = usePanel();
   const { openNewIssue } = useDialog();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [actionError, setActionError] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [invokeIssueDialogOpen, setInvokeIssueDialogOpen] = useState(false);
+  const [invokeIssueRefInput, setInvokeIssueRefInput] = useState("");
+  const [invokeLinkedFreshSession, setInvokeLinkedFreshSession] = useState(false);
   const activeView = urlRunId ? "runs" as AgentDetailView : parseAgentDetailView(urlTab ?? null);
   const needsDashboardData = activeView === "dashboard";
   const needsRunData = activeView === "runs" || Boolean(urlRunId);
@@ -713,6 +732,48 @@ export function AgentDetail() {
     },
   });
 
+  const invokeLinkedHeartbeat = useMutation({
+    mutationFn: async (input: { issueRef: string; forceFreshSession: boolean }) => {
+      if (!agentLookupRef) throw new Error("No agent reference");
+      const trimmed = input.issueRef.trim();
+      if (!trimmed) throw new Error("Enter an issue UUID or identifier (e.g. TCN-123).");
+      const issue = await issuesApi.get(trimmed);
+      if (resolvedCompanyId && issue.companyId !== resolvedCompanyId) {
+        throw new Error("That issue belongs to another company.");
+      }
+      const result = await agentsApi.invoke(agentLookupRef, resolvedCompanyId ?? undefined, {
+        issueId: issue.id,
+        taskId: issue.id,
+        taskKey: issue.id,
+        forceFreshSession: input.forceFreshSession,
+      });
+      if (!("id" in result)) {
+        throw new Error("Invoke was skipped (agent not invokable).");
+      }
+      return result as HeartbeatRun;
+    },
+    onSuccess: (data) => {
+      setInvokeIssueDialogOpen(false);
+      setInvokeIssueRefInput("");
+      setInvokeLinkedFreshSession(false);
+      setActionError(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(agentLookupRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.taskSessions(agentLookupRef) });
+      if (resolvedCompanyId && agent?.id) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(resolvedCompanyId, agent.id) });
+      }
+      navigate(`/agents/${canonicalAgentRef}/runs/${data.id}`);
+    },
+    onError: (err) => {
+      const message =
+        err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Invoke failed";
+      pushToast({ title: "Could not start run", body: message, tone: "error" });
+    },
+  });
+
   const budgetMutation = useMutation({
     mutationFn: (amount: number) =>
       budgetsApi.upsertPolicy(resolvedCompanyId!, {
@@ -852,11 +913,96 @@ export function AgentDetail() {
             <Plus className="h-3.5 w-3.5 sm:mr-1" />
             <span className="hidden sm:inline">Assign Task</span>
           </Button>
-          <RunButton
-            onClick={() => agentAction.mutate("invoke")}
-            disabled={agentAction.isPending || isPendingApproval}
-            label="Run Heartbeat"
-          />
+          <div className="flex items-stretch">
+            <RunButton
+              onClick={() => agentAction.mutate("invoke")}
+              disabled={agentAction.isPending || invokeLinkedHeartbeat.isPending || isPendingApproval}
+              label="Run Heartbeat"
+              className="rounded-r-none border-r-0 pr-2"
+            />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    agentAction.isPending || invokeLinkedHeartbeat.isPending || isPendingApproval
+                  }
+                  className="rounded-l-none px-1.5"
+                  aria-label="More heartbeat options"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setInvokeIssueRefInput("");
+                    setInvokeLinkedFreshSession(false);
+                    setInvokeIssueDialogOpen(true);
+                  }}
+                >
+                  Run linked to issue…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          <Dialog open={invokeIssueDialogOpen} onOpenChange={setInvokeIssueDialogOpen}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Run heartbeat with issue context</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-1">
+                <p className="text-sm text-muted-foreground">
+                  Fills <code className="text-xs">issueId</code> / <code className="text-xs">taskKey</code>{" "}
+                  on the run so the server can resolve the issue&apos;s project workspace (not only{" "}
+                  <code className="text-xs">adapterConfig.cwd</code>).
+                </p>
+                <div className="space-y-2">
+                  <Label htmlFor="invoke-issue-ref">Issue UUID or identifier</Label>
+                  <Input
+                    id="invoke-issue-ref"
+                    placeholder="e.g. TCN-701"
+                    value={invokeIssueRefInput}
+                    onChange={(e) => setInvokeIssueRefInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        invokeLinkedHeartbeat.mutate({
+                          issueRef: invokeIssueRefInput,
+                          forceFreshSession: invokeLinkedFreshSession,
+                        });
+                      }
+                    }}
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <Checkbox
+                    checked={invokeLinkedFreshSession}
+                    onCheckedChange={(v) => setInvokeLinkedFreshSession(v === true)}
+                  />
+                  Fresh session (forceFreshSession)
+                </label>
+              </div>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button type="button" variant="outline" onClick={() => setInvokeIssueDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={invokeLinkedHeartbeat.isPending}
+                  onClick={() =>
+                    invokeLinkedHeartbeat.mutate({
+                      issueRef: invokeIssueRefInput,
+                      forceFreshSession: invokeLinkedFreshSession,
+                    })
+                  }
+                >
+                  {invokeLinkedHeartbeat.isPending ? "Starting…" : "Run"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <PauseResumeButton
             isPaused={agent.status === "paused"}
             onPause={() => agentAction.mutate("pause")}

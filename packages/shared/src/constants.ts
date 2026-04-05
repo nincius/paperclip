@@ -1,3 +1,5 @@
+export { DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL } from "./opencode-defaults.mjs";
+
 export const COMPANY_STATUSES = ["active", "paused", "archived"] as const;
 export type CompanyStatus = (typeof COMPANY_STATUSES)[number];
 
@@ -123,12 +125,23 @@ export const ISSUE_STATUSES = [
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 
+/** Single-status group for backlog-only filters and queries. */
+export const ISSUE_BACKLOG_STATUSES = ["backlog"] as const satisfies readonly IssueStatus[];
+
 export const ISSUE_TERMINAL_STATUSES = ["done", "cancelled"] as const;
 export type IssueTerminalStatus = (typeof ISSUE_TERMINAL_STATUSES)[number];
 
-export const ISSUE_OPEN_STATUSES = ISSUE_STATUSES.filter(
-  (status) => !ISSUE_TERMINAL_STATUSES.includes(status as IssueTerminalStatus),
-) as IssueStatus[];
+export type IssueOpenStatus = Exclude<IssueStatus, IssueTerminalStatus>;
+
+export const ISSUE_OPEN_STATUSES: IssueOpenStatus[] = ISSUE_STATUSES.filter(
+  (status): status is IssueOpenStatus =>
+    !ISSUE_TERMINAL_STATUSES.includes(status as IssueTerminalStatus),
+);
+
+/** Same members as `ISSUE_OPEN_STATUSES` (canonical list for DB partial-index `WHERE` clauses). Immutable at runtime. */
+export const OPEN_ISSUE_STATUSES: readonly IssueOpenStatus[] = Object.freeze([
+  ...ISSUE_OPEN_STATUSES,
+]) as readonly IssueOpenStatus[];
 
 export const ISSUE_ACTIVE_STATUSES = [
   "todo",
@@ -162,9 +175,9 @@ export const ISSUE_STATUS_TRANSITIONS: Record<IssueStatus, readonly IssueStatus[
   in_progress: ["handoff_ready", "blocked", "done", "cancelled"],
   handoff_ready: ["in_progress", "technical_review", "blocked", "cancelled"],
   technical_review: ["changes_requested", "human_review", "blocked", "cancelled"],
-  changes_requested: ["claimed", "in_progress", "blocked", "cancelled"],
+  changes_requested: ["in_progress", "claimed", "blocked", "cancelled"],
   human_review: ["technical_review", "changes_requested", "blocked", "done", "cancelled"],
-  blocked: ["todo", "claimed", "in_progress", "cancelled"],
+  blocked: ["in_progress", "todo", "claimed", "cancelled"],
   done: [],
   cancelled: [],
 };

@@ -468,12 +468,21 @@ function resolveCurrentOwner(
 
   if (issue.status === "human_review") {
     if (issue.assigneeUserId) {
+      if (issue.assigneeUserId === "local-board") {
+        return {
+          actorType: "board",
+          role: "human_reviewer",
+          agentId: null,
+          userId: null,
+          label: "Board",
+        };
+      }
       return {
-        actorType: issue.assigneeUserId === "local-board" ? "board" : "user",
+        actorType: "user",
         role: "human_reviewer",
         agentId: null,
-        userId: issue.assigneeUserId === "local-board" ? null : issue.assigneeUserId,
-        label: issue.assigneeUserId === "local-board" ? "Board" : "Human reviewer",
+        userId: issue.assigneeUserId,
+        label: "Human reviewer",
       };
     }
     if (issue.assigneeAgentId) {
@@ -504,12 +513,21 @@ function resolveCurrentOwner(
     };
   }
   if (issue.assigneeUserId) {
+    if (issue.assigneeUserId === "local-board") {
+      return {
+        actorType: "board",
+        role: "assignee",
+        agentId: null,
+        userId: null,
+        label: "Board",
+      };
+    }
     return {
-      actorType: issue.assigneeUserId === "local-board" ? "board" : "user",
+      actorType: "user",
       role: "assignee",
       agentId: null,
-      userId: issue.assigneeUserId === "local-board" ? null : issue.assigneeUserId,
-      label: issue.assigneeUserId === "local-board" ? "Board" : "Assigned user",
+      userId: issue.assigneeUserId,
+      label: "Assigned user",
     };
   }
   return {
@@ -1141,12 +1159,18 @@ export function issueService(db: Db) {
       }
       if (issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
+        patch.executionRunId = null;
+        patch.executionAgentNameKey = null;
+        patch.executionLockedAt = null;
       }
       if (
         (issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== existing.assigneeAgentId) ||
         (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== existing.assigneeUserId)
       ) {
         patch.checkoutRunId = null;
+        patch.executionRunId = null;
+        patch.executionAgentNameKey = null;
+        patch.executionLockedAt = null;
       }
 
       return db.transaction(async (tx) => {
@@ -1266,7 +1290,7 @@ export function issueService(db: Db) {
         return withOwner;
       }
 
-      const current = await db
+      let current = await db
         .select({
           id: issues.id,
           status: issues.status,
@@ -1279,6 +1303,72 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!current) throw notFound("Issue not found");
+
+      // Stale execution_run_id (e.g. issue back in todo after a board PATCH cleared checkout but not
+      // execution, or release() before this fix) blocks checkout because executionLockCondition requires
+      // a matching run. Mention-triggered wakes bypass enqueue-time lock cleanup, so repair here.
+      if (
+        checkoutRunId &&
+        current.executionRunId &&
+        current.executionRunId !== checkoutRunId &&
+        expectedStatuses.includes(current.status) &&
+        (await isTerminalOrMissingHeartbeatRun(current.executionRunId))
+      ) {
+        const [clearedRow] = await db
+          .update(issues)
+          .set({
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(issues.id, id), eq(issues.executionRunId, current.executionRunId)))
+          .returning({ id: issues.id });
+
+        if (clearedRow) {
+          const retried = await db
+            .update(issues)
+            .set({
+              assigneeAgentId: agentId,
+              assigneeUserId: null,
+              checkoutRunId,
+              executionRunId: checkoutRunId,
+              status: "in_progress",
+              startedAt: now,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(issues.id, id),
+                inArray(issues.status, expectedStatuses),
+                or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
+                or(isNull(issues.executionRunId), eq(issues.executionRunId, checkoutRunId)),
+              ),
+            )
+            .returning()
+            .then((rows) => rows[0] ?? null);
+
+          if (retried) {
+            const [enriched] = await withIssueLabels(db, [retried]);
+            const [withOwner] = await withCurrentOwners(db, [enriched]);
+            return withOwner;
+          }
+
+          current = await db
+            .select({
+              id: issues.id,
+              status: issues.status,
+              assigneeAgentId: issues.assigneeAgentId,
+              checkoutRunId: issues.checkoutRunId,
+              executionRunId: issues.executionRunId,
+            })
+            .from(issues)
+            .where(eq(issues.id, id))
+            .then((rows) => rows[0] ?? null);
+
+          if (!current) throw notFound("Issue not found");
+        }
+      }
 
       if (
         current.assigneeAgentId === agentId &&
@@ -1480,6 +1570,9 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))

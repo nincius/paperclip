@@ -65,13 +65,23 @@ export function parseCodexJsonl(stdout: string) {
   };
 }
 
+const MISSING_THREAD_PATTERNS = [
+  "unknown (session|thread)",
+  "session .* not found",
+  "thread .* not found",
+  "conversation .* not found",
+  "missing rollout path for thread",
+  "state db missing rollout path",
+  "no rollout found for thread id",
+] as const;
+
+const MISSING_THREAD_ERROR_RE = new RegExp(MISSING_THREAD_PATTERNS.join("|"), "i");
+
 export function isCodexUnknownSessionError(stdout: string, stderr: string): boolean {
   const haystack = `${stdout}\n${stderr}`
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .join("\n");
-  return /unknown (session|thread)|session .* not found|thread .* not found|conversation .* not found|missing rollout path for thread|state db missing rollout path|no rollout found for thread id/i.test(
-    haystack,
-  );
+  return MISSING_THREAD_ERROR_RE.test(haystack);
 }

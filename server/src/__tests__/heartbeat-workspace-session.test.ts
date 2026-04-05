@@ -208,13 +208,32 @@ describe("resolveRuntimeSessionLegacyFallback", () => {
     ).toBe("sess-1");
   });
 
-  it("returns null when task key is set", () => {
+  it("returns null when task key is set (task-scoped session wins over legacy fallback)", () => {
     expect(
       resolveRuntimeSessionLegacyFallback({
         taskKey: "issue-1",
         resetTaskSession: false,
-        adapterType: "codex_local",
-        legacySessionId: "thread-abc",
+        adapterType: "claude_local",
+        legacySessionId: "sess-legacy",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null for claude_local when legacy session id is missing", () => {
+    expect(
+      resolveRuntimeSessionLegacyFallback({
+        taskKey: null,
+        resetTaskSession: false,
+        adapterType: "claude_local",
+        legacySessionId: null,
+      }),
+    ).toBeNull();
+    expect(
+      resolveRuntimeSessionLegacyFallback({
+        taskKey: null,
+        resetTaskSession: false,
+        adapterType: "claude_local",
+        legacySessionId: undefined,
       }),
     ).toBeNull();
   });

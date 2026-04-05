@@ -36,12 +36,17 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     const host = window.location.hostname;
     if (isLoopbackHost(host)) {
-      void navigator.serviceWorker.getRegistrations().then((regs) => {
-        for (const r of regs) void r.unregister();
-      });
+      void navigator.serviceWorker
+        .getRegistrations()
+        .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+        .catch((err) => {
+          console.error("[paperclip] service worker: getRegistrations/unregister failed", err);
+        });
       return;
     }
-    void navigator.serviceWorker.register("/sw.js");
+    void navigator.serviceWorker.register("/sw.js").catch((err) => {
+      console.error("[paperclip] service worker: register failed", err);
+    });
   });
 }
 

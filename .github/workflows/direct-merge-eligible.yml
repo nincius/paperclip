@@ -19,33 +19,38 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Merge PR when body contains direct_merge_eligible
+      - name: Merge PR when body contains <!-- direct_merge_eligible --> marker
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_JSON: ${{ toJson(github.event.workflow_run.pull_requests) }}
         run: |
           set -euo pipefail
-          pr_json='${{ toJson(github.event.workflow_run.pull_requests) }}'
-          count="$(echo "$pr_json" | jq 'length')"
+          pr_json="${PR_JSON}"
+          count="$(printf '%s' "$pr_json" | jq 'length')"
           if [ "$count" -eq 0 ]; then
             echo "No pull_requests on workflow_run; skipping."
             exit 0
           fi
-          pr_number="$(echo "$pr_json" | jq -r '.[0].number')"
+          pr_number="$(printf '%s' "$pr_json" | jq -r '.[0].number')"
           repo="${{ github.repository }}"
 
-          body="$(gh pr view "$pr_number" --repo "$repo" --json body -q .body)"
-          case "$body" in *direct_merge_eligible*) ;; *)
-            echo "PR body does not contain direct_merge_eligible; skipping."
+          pr_view_json="$(gh pr view "$pr_number" --repo "$repo" --json body,baseRefName,isDraft)"
+          body="$(printf '%s' "$pr_view_json" | jq -r .body)"
+          base="$(printf '%s' "$pr_view_json" | jq -r .baseRefName)"
+          draft="$(printf '%s' "$pr_view_json" | jq -r .isDraft)"
+
+          marker='<!-- direct_merge_eligible -->'
+          body_lc="$(printf '%s' "$body" | tr '[:upper:]' '[:lower:]')"
+          case "$body_lc" in *"$marker"*) ;; *)
+            echo "PR body does not contain <!-- direct_merge_eligible --> (case-insensitive); skipping."
             exit 0
             ;; esac
 
-          base="$(gh pr view "$pr_number" --repo "$repo" --json baseRefName -q .baseRefName)"
           if [ "$base" != "master" ]; then
             echo "Base ref is $base (expected master); skipping."
             exit 0
           fi
 
-          draft="$(gh pr view "$pr_number" --repo "$repo" --json isDraft -q .isDraft)"
           if [ "$draft" = "true" ]; then
             echo "PR is draft; skipping."
             exit 0

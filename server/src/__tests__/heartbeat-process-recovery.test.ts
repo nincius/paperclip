@@ -131,6 +131,7 @@ describe("heartbeat orphaned process recovery", () => {
       child.kill("SIGKILL");
     }
     childProcesses.clear();
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -549,8 +550,9 @@ describe("heartbeat orphaned process recovery", () => {
       contextSnapshot: { issueId },
     });
 
-    expect(queuedRun?.id).toBeTruthy();
-    const run = await waitForRunFinalStatus(heartbeat, queuedRun!.id);
+    const runId = queuedRun?.id;
+    expect(runId).toBeDefined();
+    const run = await waitForRunFinalStatus(heartbeat, runId!);
     expect(run.status).toBe("failed");
     expect(run.errorCode).toBe("execution_workspace_policy_violation");
     expect(run.error).toContain("requires a git checkout");

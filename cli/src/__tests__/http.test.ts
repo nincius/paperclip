@@ -156,6 +156,7 @@ describe("PaperclipApiClient", () => {
     await vi.runAllTimersAsync();
     const { ok, err } = await outcome;
     expect(ok).toBe(false);
+    expect(err).toBeInstanceOf(ApiRequestError);
     expect(err).toMatchObject({ status: 503 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

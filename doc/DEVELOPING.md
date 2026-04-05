@@ -456,3 +456,7 @@ Networking behavior for this smoke script:
 - auto-detects and prints a Paperclip host URL reachable from inside OpenClaw Docker
 - default container-side host alias is `host.docker.internal` (override with `PAPERCLIP_HOST_FROM_CONTAINER` / `PAPERCLIP_HOST_PORT`)
 - if Paperclip rejects container hostnames in authenticated/private mode, allow `host.docker.internal` via `pnpm paperclipai allowed-hostname host.docker.internal` and restart Paperclip
+
+## Playwright CLI snapshots
+
+The directory `.playwright-cli/` is for **local** ad-hoc dumps from the Playwright CLI (page YAML / console logs). It is listed in `.gitignore` and must not be committed—snapshots belong in CI artifacts or in curated fixtures under `tests/` when tests need them.

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, boolean, uniqueIndex, index } from "drizzle-orm/pg-core";
 
 export const companies = pgTable(
   "companies",
@@ -24,5 +24,8 @@ export const companies = pgTable(
   },
   (table) => ({
     issuePrefixUniqueIdx: uniqueIndex("companies_issue_prefix_idx").on(table.issuePrefix),
+    technicalReviewerReferenceIdx: index("idx_companies_technical_reviewer_reference").on(
+      table.technicalReviewerReference,
+    ),
   }),
 );

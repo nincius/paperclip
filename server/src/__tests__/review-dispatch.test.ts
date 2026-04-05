@@ -1,5 +1,32 @@
+import type { Db } from "@paperclipai/db";
 import { describe, expect, it, vi } from "vitest";
 import { reviewDispatchService, REVIEW_DISPATCH_ORIGIN_KIND } from "../services/review-dispatch.ts";
+
+type ServiceDeps = Parameters<typeof reviewDispatchService>[1];
+
+const testDb = {} as Db;
+
+function createMockDeps(overrides?: Partial<ServiceDeps>): ServiceDeps {
+  return {
+    agents: {
+      resolveByReference: vi.fn(async () => ({ agent: null, ambiguous: false as const })),
+    },
+    issues: {
+      getById: vi.fn(async () => null),
+      getComment: vi.fn(async () => null),
+      listComments: vi.fn(async () => []),
+      list: vi.fn(async () => []),
+      create: vi.fn(),
+    },
+    workProducts: {
+      listForIssue: vi.fn(async () => []),
+    },
+    companies: {
+      getById: vi.fn(async () => null),
+    },
+    ...overrides,
+  } as ServiceDeps;
+}
 
 function makeIssue(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -78,7 +105,11 @@ describe("reviewDispatchService", () => {
       listForIssue: vi.fn(async () => []),
     };
 
-    const svc = reviewDispatchService({} as any, { agents: agents as any, issues: issues as any, workProducts: workProducts as any });
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
     const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-1" });
 
     expect(result.kind).toBe("created");
@@ -122,7 +153,11 @@ describe("reviewDispatchService", () => {
       listForIssue: vi.fn(async () => []),
     };
 
-    const svc = reviewDispatchService({} as any, { agents: agents as any, issues: issues as any, workProducts: workProducts as any });
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
     const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-1" });
 
     expect(result.kind).toBe("reused");
@@ -154,7 +189,11 @@ describe("reviewDispatchService", () => {
       listForIssue: vi.fn(async () => []),
     };
 
-    const svc = reviewDispatchService({} as any, { agents: agents as any, issues: issues as any, workProducts: workProducts as any });
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
     const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-1" });
 
     expect(result.kind).toBe("already_reviewed");
@@ -162,61 +201,46 @@ describe("reviewDispatchService", () => {
     expect(issues.create).not.toHaveBeenCalled();
   });
 
-  it("does not create a new review ticket when the handoff comment explicitly says there is no new diff", async () => {
-    const existingReviewIssue = makeReviewIssue({
-      status: "done",
-      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
-      originId: "github:acme/app:pr:212:comment:comment-previous",
-      createdAt: new Date("2026-03-29T21:47:05.000Z"),
-    });
-    const restoredComment = makeComment({
-      id: "comment-restore",
+  it.each([
+    {
+      scenario: "the handoff comment explicitly says there is no new diff",
+      commentId: "comment-restore",
       body: `## Handoff restaurado
 
 - resumo: mantive o mesmo change set e restaurei o estado de handoff sem alterar codigo, commit, push ou PR.
 - PR: https://github.com/acme/app/pull/212`,
       createdAt: new Date("2026-03-29T22:05:00.000Z"),
-    });
+    },
+    {
+      scenario: "comment uses 'sem novas mudancas de codigo nesta rodada' wording",
+      commentId: "comment-restore-pt",
+      body: `## Handoff
 
-    const agents = {
-      resolveByReference: vi.fn(async () => ({
-        agent: { id: "reviewer-1", companyId: "company-1", name: "Revisor PR", status: "idle" },
-        ambiguous: false,
-      })),
-    };
-    const issues = {
-      getById: vi.fn(async () => makeIssue()),
-      getComment: vi.fn(async () => restoredComment),
-      listComments: vi.fn(async () => []),
-      list: vi.fn(async () => [existingReviewIssue]),
-      create: vi.fn(),
-    };
-    const workProducts = {
-      listForIssue: vi.fn(async () => []),
-    };
+- resumo: revisao tecnica automatizada 2 concluiu sem findings; PR segue pronto para revisao humana final, sem novas mudancas de codigo nesta rodada.
+- PR: https://github.com/acme/app/pull/212`,
+      createdAt: new Date("2026-03-29T22:10:00.000Z"),
+    },
+    {
+      scenario: "operational comment uses 'nao houve diff novo' wording",
+      commentId: "comment-operational-no-diff",
+      body: `## Update
 
-    const svc = reviewDispatchService({} as any, { agents: agents as any, issues: issues as any, workProducts: workProducts as any });
-    const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-restore" });
-
-    expect(result.kind).toBe("already_reviewed");
-    expect(result.reviewIssue.id).toBe("review-1");
-    expect(issues.create).not.toHaveBeenCalled();
-  });
-
-  it("treats 'sem novas mudancas de codigo nesta rodada' as no new diff wording", async () => {
+- A revisao tecnica ja concluiu sem findings relevantes e nao houve diff novo nem novo commit.
+- Estado do codigo: inalterado desde o commit \`10215239\`
+- PR: https://github.com/acme/app/pull/212`,
+      createdAt: new Date("2026-03-29T22:12:00.000Z"),
+    },
+  ])("does not create a new review ticket when %s", async ({ commentId, body, createdAt }) => {
     const existingReviewIssue = makeReviewIssue({
       status: "done",
       originKind: REVIEW_DISPATCH_ORIGIN_KIND,
       originId: "github:acme/app:pr:212:comment:comment-previous",
       createdAt: new Date("2026-03-29T21:47:05.000Z"),
     });
-    const restoredComment = makeComment({
-      id: "comment-restore-pt",
-      body: `## Handoff
-
-- resumo: revisao tecnica automatizada 2 concluiu sem findings; PR segue pronto para revisao humana final, sem novas mudancas de codigo nesta rodada.
-- PR: https://github.com/acme/app/pull/212`,
-      createdAt: new Date("2026-03-29T22:10:00.000Z"),
+    const handoffComment = makeComment({
+      id: commentId,
+      body,
+      createdAt,
     });
 
     const agents = {
@@ -227,7 +251,7 @@ describe("reviewDispatchService", () => {
     };
     const issues = {
       getById: vi.fn(async () => makeIssue()),
-      getComment: vi.fn(async () => restoredComment),
+      getComment: vi.fn(async () => handoffComment),
       listComments: vi.fn(async () => []),
       list: vi.fn(async () => [existingReviewIssue]),
       create: vi.fn(),
@@ -236,11 +260,180 @@ describe("reviewDispatchService", () => {
       listForIssue: vi.fn(async () => []),
     };
 
-    const svc = reviewDispatchService({} as any, { agents: agents as any, issues: issues as any, workProducts: workProducts as any });
-    const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-restore-pt" });
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId });
 
     expect(result.kind).toBe("already_reviewed");
     expect(result.reviewIssue.id).toBe("review-1");
+    expect(result.dedupReason).toBe("no_new_diff_declared");
     expect(issues.create).not.toHaveBeenCalled();
+  });
+
+  it("treats repeated handoffs with the same explicit head sha as the same reviewed diff", async () => {
+    const existingReviewIssue = makeReviewIssue({
+      status: "done",
+      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
+      originId: "github:acme/app:pr:212:head:10215239",
+      createdAt: new Date("2026-03-29T21:47:05.000Z"),
+    });
+    const repeatedHandoff = makeComment({
+      id: "comment-head-repeat",
+      body: `## Handoff
+
+- Head: \`10215239\`
+- PR: https://github.com/acme/app/pull/212`,
+      createdAt: new Date("2026-03-29T22:15:00.000Z"),
+    });
+
+    const agents = {
+      resolveByReference: vi.fn(async () => ({
+        agent: { id: "reviewer-1", companyId: "company-1", name: "Revisor PR", status: "idle" },
+        ambiguous: false,
+      })),
+    };
+    const issues = {
+      getById: vi.fn(async () => makeIssue()),
+      getComment: vi.fn(async () => repeatedHandoff),
+      listComments: vi.fn(async () => []),
+      list: vi.fn(async () => [existingReviewIssue]),
+      create: vi.fn(),
+    };
+    const workProducts = {
+      listForIssue: vi.fn(async () => []),
+    };
+
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-head-repeat" });
+
+    expect(result.kind).toBe("already_reviewed");
+    expect(result.reviewIssue.id).toBe("review-1");
+    expect(result.dedupReason).toBe("exact_diff_identity");
+    expect(issues.create).not.toHaveBeenCalled();
+  });
+
+  it("ignores reviewer recap comments and falls back to the latest explicit handoff", async () => {
+    const existingReviewIssue = makeReviewIssue({
+      status: "done",
+      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
+      originId: "github:acme/app:pr:212:comment:comment-handoff",
+      createdAt: new Date("2026-03-29T21:47:05.000Z"),
+    });
+    const recapComment = makeComment({
+      id: "comment-recap",
+      body: `## Recap tecnico
+
+- Revisao tecnica concluida sem findings relevantes.
+- PR: https://github.com/acme/app/pull/212`,
+      createdAt: new Date("2026-03-29T22:20:00.000Z"),
+    });
+    const handoffComment = makeComment({
+      id: "comment-handoff",
+      body: `## Handoff
+
+- PR: https://github.com/acme/app/pull/212
+
+@Revisor PR`,
+      createdAt: new Date("2026-03-29T21:25:15.000Z"),
+    });
+
+    const agents = {
+      resolveByReference: vi.fn(async () => ({
+        agent: { id: "reviewer-1", companyId: "company-1", name: "Revisor PR", status: "idle" },
+        ambiguous: false,
+      })),
+    };
+    const issues = {
+      getById: vi.fn(async () => makeIssue()),
+      getComment: vi.fn(async () => null),
+      listComments: vi.fn(async () => [recapComment, handoffComment]),
+      list: vi.fn(async () => [existingReviewIssue]),
+      create: vi.fn(),
+    };
+    const workProducts = {
+      listForIssue: vi.fn(async () => []),
+    };
+
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1" });
+
+    expect(result.kind).toBe("already_reviewed");
+    expect(result.reviewIssue.id).toBe("review-1");
+    expect(result.dedupReason).toBe("exact_diff_identity");
+    expect(issues.create).not.toHaveBeenCalled();
+  });
+
+  it("returns reviewer_ambiguous noop when multiple agents match the reviewer reference", async () => {
+    const agents = {
+      resolveByReference: vi.fn(async () => ({ agent: null, ambiguous: true })),
+    };
+    const issues = {
+      getById: vi.fn(async () => makeIssue()),
+      getComment: vi.fn(async () => null),
+      listComments: vi.fn(async () => []),
+      list: vi.fn(async () => []),
+      create: vi.fn(),
+    };
+    const workProducts = { listForIssue: vi.fn(async () => []) };
+
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1" });
+
+    expect(result).toEqual({ kind: "noop", reason: "reviewer_ambiguous" });
+    expect(issues.create).not.toHaveBeenCalled();
+  });
+
+  it("uses company technicalReviewerReference when resolving the reviewer", async () => {
+    const createdReviewIssue = makeReviewIssue({
+      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
+      originId: "github:acme/app:pr:212:description",
+    });
+    const companies = {
+      getById: vi.fn(async () => ({ technicalReviewerReference: "custom-reviewer" })),
+    };
+    const agents = {
+      resolveByReference: vi.fn(async () => ({
+        agent: { id: "reviewer-x", companyId: "company-1", name: "Custom", status: "idle" },
+        ambiguous: false,
+      })),
+    };
+    const issues = {
+      getById: vi.fn(async () => ({
+        ...makeIssue(),
+        description: "PR: https://github.com/acme/app/pull/212",
+      })),
+      getComment: vi.fn(async () => null),
+      listComments: vi.fn(async () => []),
+      list: vi.fn(async () => []),
+      create: vi.fn(async () => createdReviewIssue),
+    };
+    const workProducts = { listForIssue: vi.fn(async () => []) };
+
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+      companies,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1" });
+
+    expect(result.kind).toBe("created");
+    expect(companies.getById).toHaveBeenCalledWith("company-1");
+    expect(agents.resolveByReference).toHaveBeenCalledWith("company-1", "custom-reviewer");
   });
 });

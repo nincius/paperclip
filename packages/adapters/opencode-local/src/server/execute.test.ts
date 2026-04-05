@@ -71,6 +71,8 @@ describe("opencode execute", () => {
         },
       });
 
+      expect(mockEnsureOpenCodeModelConfiguredAndAvailable).toHaveBeenCalled();
+
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBeNull();
       expect(logs).toContainEqual(

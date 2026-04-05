@@ -1,4 +1,5 @@
-import type { QuotaWindow } from "@paperclipai/shared";
+import { useMemo } from "react";
+import { DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL, type QuotaWindow } from "@paperclipai/shared";
 import { cn, quotaSourceDisplayName } from "@/lib/utils";
 
 interface CodexSubscriptionPanelProps {
@@ -61,6 +62,13 @@ export function CodexSubscriptionPanel({
   const accountWindows = ordered.filter((window) => !isModelSpecific(window.label));
   const modelWindows = ordered.filter((window) => isModelSpecific(window.label));
 
+  const showOpencodeFallbackHint = useMemo(() => {
+    if (ordered.length === 0) return false;
+    return ordered.some(
+      (w) => w.usedPercent != null && w.usedPercent >= 75,
+    );
+  }, [ordered]);
+
   return (
     <div className="border border-border px-4 py-4">
       <div className="flex items-start justify-between gap-3 border-b border-border pb-3">
@@ -107,6 +115,16 @@ export function CodexSubscriptionPanel({
                 <QuotaWindowRow key={window.label} window={window} />
               ))}
             </div>
+          </div>
+        ) : null}
+
+        {showOpencodeFallbackHint ? (
+          <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground leading-relaxed">
+            <span className="font-medium text-foreground">Hitting Codex limits?</span> Consider{" "}
+            <span className="font-mono text-foreground">opencode_local</span> agents with a free OpenCode route such
+            as <span className="font-mono text-foreground break-all">{DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL}</span> — the id
+            must appear in <span className="font-mono">opencode models</span> on the Paperclip host. Bulk migrate:{" "}
+            <span className="font-mono">pnpm rollout:opencode-from-codex-quota</span>.
           </div>
         ) : null}
       </div>

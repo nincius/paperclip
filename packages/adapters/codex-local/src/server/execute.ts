@@ -66,7 +66,7 @@ function resolveCodexErrorCode(input: {
   if (
     /\b(login|sign in|authenticate|authentication|unauthorized)\b/.test(blob) ||
     /\b401\b/.test(blob) ||
-    /invalid_?api_?key|incorrect api key|api key.*invalid|missing api key|invalid_api_key/i.test(blob)
+    /invalid_?api_?key|incorrect api key|api key.*invalid|missing api key/.test(blob)
   ) {
     return "codex_auth_required";
   }
@@ -278,7 +278,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     : [];
   const runtimePrimaryUrl = asString(context.paperclipRuntimePrimaryUrl, "");
   const configuredCwd = asString(config.cwd, "");
-  const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
+  const useConfiguredInsteadOfAgentHome =
+    (workspaceSource === "agent_home" || workspaceSource === "adapter_config") && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);

@@ -59,7 +59,7 @@ function resolveOpenCodeErrorCode(input: {
   if (
     /\b(unauthorized|authentication|not authenticated)\b/.test(blob) ||
     /\b401\b/.test(blob) ||
-    /invalid_?api_?key|incorrect api key|api key.*invalid|missing api key/i.test(blob)
+    /invalid_?api_?key|incorrect api key|api key.*invalid|missing api key/.test(blob)
   ) {
     return "opencode_auth_required";
   }
@@ -81,12 +81,24 @@ function isOpenCodeModelsTimeoutError(err: unknown): boolean {
  * global action to `"allow"` matches `PermissionActionConfig` and covers managed instructions
  * outside `cwd` plus the issue workspace.
  */
-function mergeOpenCodePermissionNonInteractive(existing: string | undefined): string {
+async function mergeOpenCodePermissionNonInteractive(
+  existing: string | undefined,
+  onLog?: AdapterExecutionContext["onLog"],
+): Promise<string> {
   let parsed: Record<string, unknown> = {};
   if (typeof existing === "string" && existing.trim().length > 0) {
     try {
       parsed = parseObject(JSON.parse(existing));
-    } catch {
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const raw =
+        existing.length > 800 ? `${existing.slice(0, 800)}… (truncated, ${existing.length} chars)` : existing;
+      const line = `[paperclip] Warning: OPENCODE_PERMISSION is not valid JSON or could not be normalized (${reason}); value: ${raw}\n`;
+      if (onLog) {
+        await onLog("stderr", line);
+      } else {
+        console.warn(line.trimEnd());
+      }
       parsed = {};
     }
   }
@@ -173,7 +185,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       )
     : [];
   const configuredCwd = asString(config.cwd, "");
-  const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
+  const useConfiguredInsteadOfAgentHome =
+    (workspaceSource === "agent_home" || workspaceSource === "adapter_config") && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
@@ -260,7 +273,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? path.resolve(cwd, instructionsFilePath)
     : "";
 
-  env.OPENCODE_PERMISSION = mergeOpenCodePermissionNonInteractive(env.OPENCODE_PERMISSION);
+  env.OPENCODE_PERMISSION = await mergeOpenCodePermissionNonInteractive(env.OPENCODE_PERMISSION, onLog);
   const runtimeEnv = Object.fromEntries(
     Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",

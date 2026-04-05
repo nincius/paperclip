@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, desc, eq, inArray, isNull, ne, not } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne, not, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agentRuntimeState, agents, companyMemberships, heartbeatRuns, issues } from "@paperclipai/db";
 import type { AdapterEnvironmentCheck } from "@paperclipai/shared";
 import { findServerAdapter } from "../adapters/index.js";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
+import { logger } from "../middleware/logger.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { logActivity } from "./activity-log.js";
 import { issueService } from "./issues.js";
@@ -30,6 +31,8 @@ const DEFAULT_HEARTBEAT_STALE_MULTIPLIER = 3;
 const DEFAULT_HEARTBEAT_STALE_MIN_MS = 30 * 60 * 1000;
 const DEFAULT_QUEUE_STARVATION_MS = 15 * 60 * 1000;
 const DEFAULT_ALERT_REOPEN_COOLDOWN_MS = 30 * 60 * 1000;
+/** Bound historical agent-health issue scans for reopen/cooldown (see tick query). */
+const HISTORICAL_AGENT_HEALTH_ALERT_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const OPEN_ISSUE_STATUSES = [
   "backlog",
@@ -420,12 +423,12 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
         companyId: agent.companyId,
         originId: normalizeAlertOriginId(agent.id, "unknown_adapter"),
         title: `Agent health: ${agent.name} uses an unknown adapter`,
-          description: buildAlertDescription({
-            agent,
-            code: "unknown_adapter",
-            summary: `The configured adapter \`${agent.adapterType}\` is not registered in this runtime.`,
-            details: [],
-          }),
+        description: buildAlertDescription({
+          agent,
+          code: "unknown_adapter",
+          summary: `The configured adapter \`${agent.adapterType}\` is not registered in this runtime.`,
+          details: [],
+        }),
         priority: "critical",
         assigneeAgentId,
       });
@@ -745,6 +748,7 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
     }
 
     for (const grouped of queueByOwnerAndStatus.values()) {
+      if (grouped.length === 0) continue;
       const [{ issue, owner }] = grouped;
       const status = issue.status as ReviewQueueStatus;
       const policy = reviewQueuePolicies[status];
@@ -787,7 +791,7 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
         .from(agents)
         .where(and(ne(agents.status, "terminated"), ne(agents.status, "pending_approval")));
       if (monitoredAgents.length === 0) {
-        return { checked: 0, findings: 0, created: 0, updated: 0, resolved: 0 };
+        return { checked: 0, findings: 0, created: 0, updated: 0, resolved: 0, failed: 0 };
       }
 
       const agentIds = monitoredAgents.map((agent) => agent.id);
@@ -818,6 +822,7 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
             isNull(issues.hiddenAt),
           ),
         );
+      const historicalAlertCutoff = new Date(now.getTime() - HISTORICAL_AGENT_HEALTH_ALERT_LOOKBACK_MS);
       const historicalAlerts = await db
         .select()
         .from(issues)
@@ -825,6 +830,7 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
           and(
             eq(issues.originKind, AGENT_HEALTH_ALERT_ORIGIN_KIND),
             isNull(issues.hiddenAt),
+            or(gte(issues.updatedAt, historicalAlertCutoff), gte(issues.createdAt, historicalAlertCutoff)),
           ),
         );
 
@@ -939,9 +945,15 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
         }
       }
 
-      let created = 0;
-      let updated = 0;
-      let resolved = 0;
+      type CooldownLogTask = {
+        finding: HealthFinding;
+        reusable: IssueRow;
+        latestAlertTimestamp: Date;
+      };
+      const cooldownLogTasks: CooldownLogTask[] = [];
+      const reopenTasks: Array<{ finding: HealthFinding; reusable: IssueRow }> = [];
+      const createFindings: HealthFinding[] = [];
+      const patchTasks: Array<{ existing: IssueRow; finding: HealthFinding }> = [];
 
       for (const finding of activeFindingByOriginId.values()) {
         const existing = openAlertByOriginId.get(finding.originId) ?? null;
@@ -953,43 +965,57 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
               !isReviewQueueAlertOriginId(finding.originId)
               && now.getTime() - latestAlertTimestamp.getTime() < alertReopenCooldownMs;
             if (withinCooldown) {
-              await logActivity(db, {
-                companyId: finding.companyId,
-                actorType: "system",
-                actorId: "agent-health-monitor",
-                action: "issue.health_alert_reopen_suppressed",
-                entityType: "issue",
-                entityId: reusable.id,
-                agentId: parseAgentIdFromOrigin(finding.originId),
-                details: {
-                  originId: finding.originId,
-                  cooldownMs: alertReopenCooldownMs,
-                  latestAlertAt: latestAlertTimestamp.toISOString(),
-                  reason: "recent_auto_resolve_cooldown",
-                },
-              });
+              cooldownLogTasks.push({ finding, reusable, latestAlertTimestamp });
               continue;
             }
-            await issuesSvc.update(reusable.id, {
-              status: "todo",
-              title: finding.title,
-              description: finding.description,
-              priority: finding.priority,
-              assigneeAgentId: finding.assigneeAgentId,
-            });
-            await issuesSvc.addComment(
-              reusable.id,
-              [
-                "## Update",
-                "",
-                "- Agent health condition recurred for this same origin.",
-                "- Reopening the existing alert instead of creating a new issue.",
-              ].join("\n"),
-              {},
-            );
-            updated += 1;
+            reopenTasks.push({ finding, reusable });
             continue;
           }
+          createFindings.push(finding);
+          continue;
+        }
+
+        if (!issuePatchNeeded(existing, finding)) continue;
+        patchTasks.push({ existing, finding });
+      }
+
+      const closeAlerts: IssueRow[] = [];
+      for (const alert of openAlerts) {
+        if (!alert.originId || !evaluatedOriginIds.has(alert.originId)) continue;
+        if (activeFindingByOriginId.has(alert.originId)) continue;
+        closeAlerts.push(alert);
+      }
+
+      let failed = 0;
+
+      const runCooldownLog = async (task: CooldownLogTask) => {
+        try {
+          await logActivity(db, {
+            companyId: task.finding.companyId,
+            actorType: "system",
+            actorId: "agent-health-monitor",
+            action: "issue.health_alert_reopen_suppressed",
+            entityType: "issue",
+            entityId: task.reusable.id,
+            agentId: parseAgentIdFromOrigin(task.finding.originId),
+            details: {
+              originId: task.finding.originId,
+              cooldownMs: alertReopenCooldownMs,
+              latestAlertAt: task.latestAlertTimestamp.toISOString(),
+              reason: "recent_auto_resolve_cooldown",
+            },
+          });
+        } catch (err) {
+          failed += 1;
+          logger.error(
+            { err, originId: task.finding.originId, op: "health_alert_reopen_suppressed_log" },
+            "agent health monitor: per-item cooldown log failed",
+          );
+        }
+      };
+
+      const runCreate = async (finding: HealthFinding) => {
+        try {
           await issuesSvc.create(finding.companyId, {
             title: finding.title,
             description: finding.description,
@@ -999,36 +1025,105 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
             originKind: AGENT_HEALTH_ALERT_ORIGIN_KIND,
             originId: finding.originId,
           });
-          created += 1;
-          continue;
+          return true;
+        } catch (err) {
+          failed += 1;
+          logger.error(
+            { err, originId: finding.originId, op: "health_alert_create" },
+            "agent health monitor: create alert failed",
+          );
+          return false;
         }
+      };
 
-        if (!issuePatchNeeded(existing, finding)) continue;
-        await issuesSvc.update(existing.id, {
-          title: finding.title,
-          description: finding.description,
-          priority: finding.priority,
-          assigneeAgentId: finding.assigneeAgentId,
-        });
-        updated += 1;
-      }
+      const runPatch = async (existing: IssueRow, finding: HealthFinding) => {
+        try {
+          await issuesSvc.update(existing.id, {
+            title: finding.title,
+            description: finding.description,
+            priority: finding.priority,
+            assigneeAgentId: finding.assigneeAgentId,
+          });
+          return true;
+        } catch (err) {
+          failed += 1;
+          logger.error(
+            { err, originId: finding.originId, issueId: existing.id, op: "health_alert_patch" },
+            "agent health monitor: patch open alert failed",
+          );
+          return false;
+        }
+      };
 
-      for (const alert of openAlerts) {
-        if (!alert.originId || !evaluatedOriginIds.has(alert.originId)) continue;
-        if (activeFindingByOriginId.has(alert.originId)) continue;
-        await issuesSvc.addComment(
-          alert.id,
-          [
-            "## Update",
-            "",
-            "- Agent health check passed again for this condition.",
-            "- Closing the alert automatically.",
-          ].join("\n"),
-          {},
-        );
-        await issuesSvc.update(alert.id, { status: "cancelled" });
-        resolved += 1;
-      }
+      const runReopen = async (finding: HealthFinding, reusable: IssueRow) => {
+        try {
+          await issuesSvc.update(reusable.id, {
+            status: "todo",
+            title: finding.title,
+            description: finding.description,
+            priority: finding.priority,
+            assigneeAgentId: finding.assigneeAgentId,
+          });
+          await issuesSvc.addComment(
+            reusable.id,
+            [
+              "## Update",
+              "",
+              "- Agent health condition recurred for this same origin.",
+              "- Reopening the existing alert instead of creating a new issue.",
+            ].join("\n"),
+            {},
+          );
+          return true;
+        } catch (err) {
+          failed += 1;
+          logger.error(
+            { err, originId: finding.originId, issueId: reusable.id, op: "health_alert_reopen" },
+            "agent health monitor: reopen historical alert failed",
+          );
+          return false;
+        }
+      };
+
+      const runClose = async (alert: IssueRow) => {
+        try {
+          await issuesSvc.addComment(
+            alert.id,
+            [
+              "## Update",
+              "",
+              "- Agent health check passed again for this condition.",
+              "- Closing the alert automatically.",
+            ].join("\n"),
+            {},
+          );
+          await issuesSvc.update(alert.id, { status: "cancelled" });
+          return true;
+        } catch (err) {
+          failed += 1;
+          logger.error(
+            { err, originId: alert.originId, issueId: alert.id, op: "health_alert_resolve" },
+            "agent health monitor: auto-resolve alert failed",
+          );
+          return false;
+        }
+      };
+
+      const [, createHits, patchHits, reopenHits, closeHits] = await Promise.all([
+        Promise.all(cooldownLogTasks.map(runCooldownLog)),
+        Promise.all(createFindings.map(runCreate)).then((results) => results.filter(Boolean).length),
+        Promise.all(patchTasks.map(({ existing, finding }) => runPatch(existing, finding))).then((results) =>
+          results.filter(Boolean).length
+        ),
+        Promise.all(reopenTasks.map(({ finding, reusable }) => runReopen(finding, reusable))).then((results) =>
+          results.filter(Boolean).length
+        ),
+        Promise.all(closeAlerts.map(runClose)).then((results) => results.filter(Boolean).length),
+      ]);
+
+      const created = createHits;
+      const updated = patchHits + reopenHits;
+      const resolved = closeHits;
 
       return {
         checked: monitoredAgents.filter((agent) => agent.status !== "paused").length,
@@ -1036,6 +1131,7 @@ export function agentHealthMonitorService(db: Db, deps: AgentHealthMonitorDeps =
         created,
         updated,
         resolved,
+        failed,
       };
     },
   };

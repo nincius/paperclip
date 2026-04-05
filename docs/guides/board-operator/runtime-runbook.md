@@ -132,7 +132,7 @@ Current dispatch contract:
 - Dedup uses the current diff identity:
   - preferred: repository + PR number + head SHA
   - fallback: repository + PR number + handoff comment or description identity
-- When a handoff comment carries an explicit head marker such as `Head atual: abc1234`, Paperclip now promotes that comment to head-based diff identity even if the pull-request work product is missing or late.
+- When a handoff comment carries an explicit head marker such as `Head: abc1234`, Paperclip now promotes that comment to head-based diff identity even if the pull-request work product is missing or late.
 
 Practical effect:
 
@@ -144,9 +144,11 @@ Practical effect:
 - no PR reference: dispatch is a no-op and the operator must attach or mention the PR explicitly (activity `issue.review_dispatch_noop` with `reason` is logged for `reviewer_not_found`, `reviewer_ambiguous`, and `pull_request_not_found`)
 - when the review child is closed with blocking findings, Paperclip requeues the source issue for the assigned executor and restores it to `in_progress`
 - when the review child is closed without blocking findings, Paperclip advances the source issue to `human_review`
+- **Unparsed or ambiguous review summaries:** if the free-text summary does not match the classifier (`server/src/services/technical-review-outcome.ts`), the source issue **stays** in its current state; the server emits a **warn** log and activity **`issue.review_outcome_unparsed`** on the review child. Operators should fix the summary wording (see `doc/plans/2026-04-05-review-outcome-classification-matrix.md`) or move the parent manually; monitor unparsed rates when the Revisor template changes.
 - this reconciliation also works when the reviewer posts the summary comment first and closes the review child in a later separate update
 - manual child issues titled like `Revisar PR #... de ...` are reconciled the same way as dispatched review children, which helps clean up historical/manual review tickets
 - when the source issue's pull-request work product is later updated to `merged` (or `closed` with merge metadata), Paperclip auto-reconciles the source issue to `done` and cancels any still-open technical-review child tickets for that PR
+- **PR merge auto-complete integrity:** parent transitions to `done` and cancellation of open review children (`technical_review_dispatch` or legacy `Revisar PR #…` titles) are applied in **one database transaction**. If that transaction fails, no issue row reaches `done` while children stay active in the same attempt—retry the work-product update or PATCH again (idempotent once merged). **After** commit, routine run sync and the `issue.updated` activity log run separately; if those fail, check server logs for `routine sync failed after PR merge auto-complete` or `PR merge auto-complete transaction failed`, verify routine execution rows, and confirm whether `issue.updated` with `autoCompletedFromPullRequest` is missing for auditing.
 
 ### Direct merge eligible (executor + GitHub)
 
@@ -154,7 +156,7 @@ Use this when you want **technical review** to stay the gate in Paperclip, but t
 
 **Contract**
 
-- **GitHub PR body** must contain the exact substring `direct_merge_eligible` (convention for humans and for the optional GitHub Action).
+- **GitHub PR body** must contain the HTML comment marker `<!-- direct_merge_eligible -->` (matching is case-insensitive; convention for humans and for the optional GitHub Action).
 - **Paperclip** only schedules an executor wake when the primary pull-request work product has **`metadata.directMergeEligible: true`** (boolean). Set this when creating or updating the work product via `POST /api/issues/{id}/work-products` or `PATCH /api/work-products/{id}` so the server does not scrape PR bodies.
 
 **Paperclip behavior**
@@ -164,7 +166,7 @@ Use this when you want **technical review** to stay the gate in Paperclip, but t
 
 **GitHub Action**
 
-- Workflow `.github/workflows/direct-merge-eligible.yml` runs after the **`PR`** workflow succeeds on a pull request targeting **`master`**. If the PR body contains `direct_merge_eligible`, the PR is not draft, and the base is `master`, it runs `gh pr merge --auto --squash`.
+- Workflow `.github/workflows/direct-merge-eligible.yml` runs after the **`PR`** workflow succeeds on a pull request targeting **`master`**. If the PR body contains `<!-- direct_merge_eligible -->` (case-insensitive), the PR is not draft, and the base is `master`, it runs `gh pr merge --auto --squash`.
 - **Billing / Actions off:** if organization workflows do not run, this job never fires; use the executor wake path and local `gh` only.
 - **Avoid double merge:** pick one primary path per team—either enable the Action **or** have the executor run `gh pr merge`, not both racing the same PR.
 

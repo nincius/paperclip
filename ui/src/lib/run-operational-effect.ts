@@ -37,7 +37,7 @@ export function runTextSummary(run: RunEffectLike): string | null {
     asNonEmptyString(result?.summary) ??
     asNonEmptyString(result?.result) ??
     asNonEmptyString(result?.message) ??
-    getRunOperationalEffect(run)?.summary ??
+    asNonEmptyString(getRunOperationalEffect(run)?.summary) ??
     asNonEmptyString(run.error)
   );
 }

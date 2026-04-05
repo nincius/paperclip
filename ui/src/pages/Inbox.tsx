@@ -54,6 +54,7 @@ import {
   type InboxTab,
 } from "../lib/inbox";
 import { useDismissedInboxItems } from "../hooks/useInboxBadge";
+import { ROUTES } from "../constants/routes";
 
 type InboxCategoryFilter =
   | "everything"
@@ -93,6 +94,15 @@ function readIssueIdFromRun(run: HeartbeatRun): string | null {
   return null;
 }
 
+function InboxRowIndicatorPlaceholders() {
+  return (
+    <>
+      <span className="hidden h-2 w-2 shrink-0 sm:inline-flex" aria-hidden="true" />
+      <span className="hidden h-3.5 w-3.5 shrink-0 sm:inline-flex" aria-hidden="true" />
+    </>
+  );
+}
+
 function FailedRunInboxRow({
   run,
   issueById,
@@ -118,11 +128,10 @@ function FailedRunInboxRow({
     <div className="group border-b border-border px-2 py-2.5 last:border-b-0 sm:px-1 sm:pr-3 sm:py-2">
       <div className="flex items-start gap-2 sm:items-center">
         <Link
-          to={`/agents/${run.agentId}/runs/${run.id}`}
+          to={ROUTES.AGENT_RUN.replace(":agentId", run.agentId).replace(":runId", run.id)}
           className="flex min-w-0 flex-1 items-start gap-2 no-underline text-inherit transition-colors hover:bg-accent/50"
         >
-          <span className="hidden h-2 w-2 shrink-0 sm:inline-flex" aria-hidden="true" />
-          <span className="hidden h-3.5 w-3.5 shrink-0 sm:inline-flex" aria-hidden="true" />
+          <InboxRowIndicatorPlaceholders />
           <span className="mt-0.5 shrink-0 rounded-md bg-red-500/20 p-1.5 sm:mt-0">
             <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
           </span>
@@ -217,11 +226,10 @@ function ApprovalInboxRow({
     <div className="border-b border-border px-2 py-2.5 last:border-b-0 sm:px-1 sm:pr-3 sm:py-2">
       <div className="flex items-start gap-2 sm:items-center">
         <Link
-          to={`/approvals/${approval.id}`}
+          to={ROUTES.APPROVAL_DETAIL.replace(":approvalId", approval.id)}
           className="flex min-w-0 flex-1 items-start gap-2 no-underline text-inherit transition-colors hover:bg-accent/50"
         >
-          <span className="hidden h-2 w-2 shrink-0 sm:inline-flex" aria-hidden="true" />
-          <span className="hidden h-3.5 w-3.5 shrink-0 sm:inline-flex" aria-hidden="true" />
+          <InboxRowIndicatorPlaceholders />
           <span className="mt-0.5 shrink-0 rounded-md bg-muted p-1.5 sm:mt-0">
             <Icon className="h-4 w-4 text-muted-foreground" />
           </span>
@@ -303,8 +311,7 @@ function JoinRequestInboxRow({
     <div className="border-b border-border px-2 py-2.5 last:border-b-0 sm:px-1 sm:pr-3 sm:py-2">
       <div className="flex items-start gap-2 sm:items-center">
         <div className="flex min-w-0 flex-1 items-start gap-2">
-          <span className="hidden h-2 w-2 shrink-0 sm:inline-flex" aria-hidden="true" />
-          <span className="hidden h-3.5 w-3.5 shrink-0 sm:inline-flex" aria-hidden="true" />
+          <InboxRowIndicatorPlaceholders />
           <span className="mt-0.5 shrink-0 rounded-md bg-muted p-1.5 sm:mt-0">
             <UserPlus className="h-4 w-4 text-muted-foreground" />
           </span>
@@ -513,8 +520,6 @@ export function Inbox() {
 
   const joinRequestsForTab = useMemo(() => {
     if (tab === "all" && !showJoinRequestsCategory) return [];
-    if (tab === "recent") return joinRequests;
-    if (tab === "unread") return joinRequests;
     return joinRequests;
   }, [joinRequests, tab, showJoinRequestsCategory]);
 
@@ -722,7 +727,7 @@ export function Inbox() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <Tabs value={tab} onValueChange={(value) => navigate(`/inbox/${value}`)}>
+          <Tabs value={tab} onValueChange={(value) => navigate(`${ROUTES.INBOX}/${value}`)}>
             <PageTabBar
               items={[
                 {

@@ -1,11 +1,15 @@
 /**
  * Managed agents (by name/role) use OpenCode + a free `opencode/*` model by default.
- * Default is Minimax M2.5 (free); override with `PAPERCLIP_OPENCODE_QUOTA_FALLBACK_MODEL`.
+ * Default model id: `DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL` in `packages/shared/src/opencode-defaults.mjs`
+ * (re-exported from `@paperclipai/shared`). Override with `PAPERCLIP_OPENCODE_QUOTA_FALLBACK_MODEL`.
  * Verify on the host: `opencode models` (ids vary by OpenCode version).
- * Keep UI copy in `CodexSubscriptionPanel` in sync with DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL.
  */
 
 import path from "node:path";
+
+import { DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL } from "../../packages/shared/src/opencode-defaults.mjs";
+
+export { DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL };
 
 /** True when `command` is the Codex CLI (bare name or absolute path, e.g. macOS `.../Codex.app/.../codex`). */
 export function commandLooksLikeCodexCli(command) {
@@ -15,22 +19,32 @@ export function commandLooksLikeCodexCli(command) {
   return base === "codex" || base === "codex.cmd" || base === "codex.exe";
 }
 
-/** Default when OpenCode lists a short provider id (e.g. `opencode/...`). Override with PAPERCLIP_OPENCODE_QUOTA_FALLBACK_MODEL or use OpenRouter slug. */
-export const DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL = "opencode/minimax-m2.5-free";
-
 export function resolveOpencodeQuotaFallbackModel() {
   return process.env.PAPERCLIP_OPENCODE_QUOTA_FALLBACK_MODEL?.trim() || DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL;
 }
 
+/**
+ * Unicode-fold agent display names for substring matching (NFD + strip combining marks + lower + trim).
+ * Invalid or missing values return `""` so callers avoid runtime errors from `.normalize` on non-strings.
+ */
 export function normalizeAgentName(name) {
-  return name
+  if (typeof name !== "string") return "";
+  const t = name.trim();
+  if (!t) return "";
+  return t
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .trim();
 }
 
-/** @returns {string | null} */
+/**
+ * Legacy PT-BR name heuristics for managed rollout (imported companies / domain wording), not a full i18n map.
+ * `normalizeAgentName` strips accents before substring checks. "claudio" is an org-specific display-name exception
+ * (implementer), not a role. Centralize new keywords here; add tests when behavior changes.
+ *
+ * @returns {string | null}
+ */
 function managedAgentLabel(agent) {
   const n = normalizeAgentName(agent.name);
 
@@ -71,31 +85,39 @@ const CODEX_ONLY_ADAPTER_KEYS = new Set([
   "extraArgs",
 ]);
 
-export function buildOpenCodeAdapterConfigFromCodex(codexConfig, opencodeModel) {
-  const src =
-    codexConfig && typeof codexConfig === "object" && !Array.isArray(codexConfig)
-      ? codexConfig
-      : {};
-  const out = { model: opencodeModel };
-
-  for (const [key, value] of Object.entries(src)) {
-    if (CODEX_ONLY_ADAPTER_KEYS.has(key)) continue;
-    out[key] = value;
-  }
-
+/**
+ * Normalizes command / timeout / grace for `opencode_local`-style adapter configs after merging fields.
+ * @param {Record<string, unknown>} out
+ */
+export function normalizeAdapterConfig(out) {
   const cmd = typeof out.command === "string" ? out.command.trim() : "";
   if (!cmd || commandLooksLikeCodexCli(cmd)) {
     out.command = "opencode";
   }
-
   if (typeof out.timeoutSec !== "number") {
     out.timeoutSec = 0;
   }
   if (typeof out.graceSec !== "number") {
     out.graceSec = 20;
   }
-
   return out;
+}
+
+export function buildOpenCodeAdapterConfigFromCodex(codexConfig, opencodeModel) {
+  const src =
+    codexConfig && typeof codexConfig === "object" && !Array.isArray(codexConfig)
+      ? codexConfig
+      : {};
+  const trimmedModel = typeof opencodeModel === "string" ? opencodeModel.trim() : "";
+  const validatedModel = trimmedModel || resolveOpencodeQuotaFallbackModel();
+  const out = { model: validatedModel };
+
+  for (const [key, value] of Object.entries(src)) {
+    if (CODEX_ONLY_ADAPTER_KEYS.has(key)) continue;
+    out[key] = value;
+  }
+
+  return normalizeAdapterConfig(out);
 }
 
 /** Build `adapterConfig` for `opencode_local` + target free model from any prior adapter config. */
@@ -113,21 +135,13 @@ export function buildNemotronOpenCodeAdapterConfig(agent, opencodeModel) {
     delete src[key];
   }
 
+  const trimmedModel = typeof opencodeModel === "string" ? opencodeModel.trim() : "";
+  const validatedModel = trimmedModel || resolveOpencodeQuotaFallbackModel();
+
   const out = {
     ...src,
-    model: opencodeModel,
+    model: validatedModel,
   };
 
-  const cmd = typeof out.command === "string" ? out.command.trim() : "";
-  if (!cmd || commandLooksLikeCodexCli(cmd)) {
-    out.command = "opencode";
-  }
-  if (typeof out.timeoutSec !== "number") {
-    out.timeoutSec = 0;
-  }
-  if (typeof out.graceSec !== "number") {
-    out.graceSec = 20;
-  }
-
-  return out;
+  return normalizeAdapterConfig(out);
 }

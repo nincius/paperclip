@@ -469,7 +469,7 @@ describe("agent skill routes", () => {
         "AGENTS.md": "You are QA.",
         "HEARTBEAT.md": expect.stringContaining("Agent Heartbeat Checklist"),
         "SOUL.md": expect.stringContaining("Agent Persona"),
-        "TOOLS.md": expect.stringContaining("# TOOLS.md"),
+        "TOOLS.md": expect.stringContaining("Tool Usage Guidelines"),
       }),
       { entryFile: "AGENTS.md", replaceExisting: false },
     );
@@ -509,7 +509,7 @@ describe("agent skill routes", () => {
         adapterType: "claude_local",
       }),
       expect.objectContaining({
-        "AGENTS.md": expect.stringContaining("You are the CEO."),
+        "AGENTS.md": expect.stringMatching(/You are the CEO\.[\s\S]*update the relevant documentation before handoff/i),
         "HEARTBEAT.md": expect.stringContaining("CEO Heartbeat Checklist"),
         "SOUL.md": expect.stringContaining("CEO Persona"),
         "TOOLS.md": expect.stringContaining("# Tools"),
@@ -536,10 +536,12 @@ describe("agent skill routes", () => {
         adapterType: "claude_local",
       }),
       expect.objectContaining({
-        "AGENTS.md": expect.stringContaining("Keep the work moving until it's done."),
+        "AGENTS.md": expect.stringMatching(
+          /Keep the work moving until it's done\.[\s\S]*you must update the relevant documentation before you finish/i,
+        ),
         "HEARTBEAT.md": expect.stringContaining("Agent Heartbeat Checklist"),
         "SOUL.md": expect.stringContaining("Agent Persona"),
-        "TOOLS.md": expect.stringContaining("# TOOLS.md"),
+        "TOOLS.md": expect.stringContaining("Tool Usage Guidelines"),
       }),
       { entryFile: "AGENTS.md", replaceExisting: false },
     );

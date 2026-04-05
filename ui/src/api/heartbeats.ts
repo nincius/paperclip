@@ -1,6 +1,7 @@
 import type {
   HeartbeatRun,
   HeartbeatRunEvent,
+  HeartbeatRunStatus,
   InstanceSchedulerHeartbeatAgent,
   WorkspaceOperation,
 } from "@paperclipai/shared";
@@ -14,7 +15,7 @@ export interface ActiveRunForIssue extends HeartbeatRun {
 
 export interface LiveRunForIssue {
   id: string;
-  status: string;
+  status: HeartbeatRunStatus;
   invocationSource: string;
   triggerDetail: string | null;
   startedAt: string | null;
@@ -30,7 +31,7 @@ export const heartbeatsApi = {
   list: (companyId: string, agentId?: string, limit?: number) => {
     const searchParams = new URLSearchParams();
     if (agentId) searchParams.set("agentId", agentId);
-    const resolvedLimit = limit ?? (agentId ? 200 : 1000);
+    const resolvedLimit = limit ?? (agentId ? 100 : 1000);
     searchParams.set("limit", String(resolvedLimit));
     return api.get<HeartbeatRun[]>(`/companies/${companyId}/heartbeat-runs?${searchParams.toString()}`);
   },

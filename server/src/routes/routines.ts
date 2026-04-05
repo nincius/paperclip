@@ -11,7 +11,7 @@ import {
 import { validate } from "../middleware/validate.js";
 import { accessService, agentService, logActivity, routineService } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
-import { forbidden, unauthorized } from "../errors.js";
+import { forbidden, notFound, unauthorized } from "../errors.js";
 
 export function routineRoutes(db: Db) {
   const router = Router();
@@ -30,6 +30,11 @@ export function routineRoutes(db: Db) {
     if (req.actor.type === "board") return;
     if (req.actor.type !== "agent" || !req.actor.agentId) throw unauthorized();
     if (!assigneeAgentId || assigneeAgentId === req.actor.agentId) return;
+
+    const assigneeAgentRecord = await agents.getById(assigneeAgentId);
+    if (!assigneeAgentRecord || assigneeAgentRecord.companyId !== companyId) {
+      throw notFound("Assignee agent not found");
+    }
 
     const [allowedByGrant, actorAgent] = await Promise.all([
       access.hasPermission(companyId, "agent", req.actor.agentId, "tasks:assign"),
@@ -63,7 +68,6 @@ export function routineRoutes(db: Db) {
   async function assertCanManageExistingRoutine(req: Request, routineId: string) {
     const routine = await svc.get(routineId);
     if (!routine) return null;
-    assertCompanyAccess(req, routine.companyId);
     await assertAgentCanManageRoutineAssignee(req, routine.companyId, routine.assigneeAgentId);
     return routine;
   }
@@ -127,11 +131,7 @@ export function routineRoutes(db: Db) {
     if (statusWillActivate) {
       await assertBoardCanAssignTasks(req, routine.companyId);
     }
-    if (
-      req.actor.type === "agent" &&
-      req.body.assigneeAgentId !== undefined &&
-      req.body.assigneeAgentId !== routine.assigneeAgentId
-    ) {
+    if (req.actor.type === "agent" && assigneeWillChange) {
       await assertAgentCanManageRoutineAssignee(req, routine.companyId, req.body.assigneeAgentId);
     }
     const updated = await svc.update(routine.id, req.body, {

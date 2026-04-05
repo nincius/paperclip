@@ -7,6 +7,22 @@ import type { PaperclipConfig } from "../config/schema.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
+/** Restore `process.env` in place so modules holding a reference to `process.env` stay valid. */
+function syncProcessEnvFrom(source: Record<string, string | undefined>) {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in source)) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
 function minimalConfig(overrides: Partial<PaperclipConfig["server"]> = {}): PaperclipConfig {
   return {
     $meta: { version: 1, updatedAt: "2026-01-01T00:00:00.000Z", source: "configure" },
@@ -44,12 +60,12 @@ describe("uiStaticArtifactsCheckForRepoRoot", () => {
   let tmp: string;
 
   beforeEach(() => {
-    process.env = { ...ORIGINAL_ENV };
+    syncProcessEnvFrom(ORIGINAL_ENV);
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pc-ui-artifacts-"));
   });
 
   afterEach(() => {
-    process.env = { ...ORIGINAL_ENV };
+    syncProcessEnvFrom(ORIGINAL_ENV);
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 

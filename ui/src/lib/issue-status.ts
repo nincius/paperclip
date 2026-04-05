@@ -1,4 +1,11 @@
-import { ISSUE_ACTIVE_STATUSES, ISSUE_STATUS_LABELS, ISSUE_STATUSES, type IssueStatus } from "@paperclipai/shared";
+import {
+  ISSUE_ACTIVE_STATUSES,
+  ISSUE_BACKLOG_STATUSES,
+  ISSUE_STATUS_LABELS,
+  ISSUE_STATUSES,
+  ISSUE_TERMINAL_STATUSES,
+  type IssueStatus,
+} from "@paperclipai/shared";
 
 export const issueStatusOrder: IssueStatus[] = [
   "in_progress",
@@ -30,22 +37,13 @@ export const issueBoardStatuses: IssueStatus[] = [
 
 export const issueFilterGroups = [
   { label: "Active", statuses: [...ISSUE_ACTIVE_STATUSES] },
-  { label: "Backlog", statuses: ["backlog"] },
-  { label: "Done", statuses: ["done", "cancelled"] },
+  { label: "Backlog", statuses: [...ISSUE_BACKLOG_STATUSES] },
+  { label: "Done", statuses: [...ISSUE_TERMINAL_STATUSES] },
 ] as const;
 
-export const inboxIssueStatuses = [
-  "backlog",
-  "todo",
-  "claimed",
-  "in_progress",
-  "handoff_ready",
-  "technical_review",
-  "changes_requested",
-  "human_review",
-  "blocked",
-  "done",
-] as const satisfies readonly IssueStatus[];
+export const inboxIssueStatuses: readonly Exclude<IssueStatus, "cancelled">[] = ISSUE_STATUSES.filter(
+  (status): status is Exclude<IssueStatus, "cancelled"> => status !== "cancelled",
+);
 
 export const issueCreateStatuses: IssueStatus[] = [...ISSUE_STATUSES];
 

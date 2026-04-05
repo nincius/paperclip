@@ -99,7 +99,9 @@ Headers: X-Paperclip-Run-Id: {runId}
 
 The server will adopt the stale lock if the previous run is no longer active. **The `runId` field is not accepted in the request body** — it comes exclusively from the `X-Paperclip-Run-Id` header (via the agent's JWT).
 
-**Cleared checkout on an `in_progress` assignee:** If `checkout_run_id` was lost while the issue stayed `in_progress` with the same assignee (for example after process loss), the heartbeat setup step may **re-bind** the current run as checkout/execution owner when `execution_run_id` is null or already matches that run—mirroring the repair branch of `POST …/checkout`. Agents should still call checkout explicitly when moving from `todo`; this path avoids hard-failing setup when the row was left inconsistent.
+**Cleared checkout on an `in_progress` assignee:** If `checkout_run_id` / `execution_run_id` drift out of sync while the issue stays `in_progress` for the same assignee (for example after process loss), heartbeat setup applies the **same repair semantics** as `POST …/checkout`: it may clear a stale `execution_run_id` when the stored run is no longer live, then **re-bind** `checkout_run_id` / `execution_run_id` to the coherent active run (including adopting the checkout run when `execution_run_id` is null but `checkout_run_id` still points at a **queued** / **running** run for this issue). Setup **does not** override a **different agent’s** live `execution_run_id`. Agents should still call checkout explicitly when moving from `todo`; this path avoids hard-failing setup when the row was left inconsistent.
+
+**Leaving `in_progress`:** `PATCH` that sets a non-`in_progress` status, changes assignee, or `POST …/release` clears **`checkout_run_id`** and the execution-lock fields (**`execution_run_id`**, **`execution_agent_name_key`**, **`execution_locked_at`**) together so an issue in **`todo`** cannot retain a stale execution lock that would make checkout fail with **409**. If legacy rows still have a stale lock pointing at a **terminal** heartbeat run, **`POST …/checkout`** clears it once and retries the claim.
 
 ## Release Task
 
@@ -211,6 +213,10 @@ backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -
                                        \-> blocked                          \-> blocked
 ```
 
+### Technical review outcome text (Portuguese and English)
+
+The server’s non-blocking / approval detectors match **both English and Portuguese** review summaries. Example phrases the parser recognizes include **`pode seguir para revisão humana`**, **`pronto para revisão humana`**, and **`aprovado` / `aprovada` (for human review)** (accents optional). Blocking sections may use headers such as **`### Findings bloqueantes`** or **`### Blocking findings`**, with “no blockers” wording (e.g. **`nenhum`**, **`none`**). Handoff comments may carry an explicit PR head line such as **`Head: abc1234`**. Manual review tickets following the pattern **`Revisar PR #... de ...`** are reconciled with the same parent rules. If the closing summary **cannot be classified** (missing markers/phrases, too vague, or **ambiguous** mixed signals), the **parent issue is not auto-transitioned**; the server logs a warning and writes **`issue.review_outcome_unparsed`** on the review child for operator follow-up (see `doc/plans/2026-04-05-review-outcome-classification-matrix.md`). The bullets below refer to this behavior without repeating every localized example.
+
 - legacy `in_review` rows are backfilled to `handoff_ready`
 - `handoff_ready` is the executor-to-review handoff; direct `in_progress -> human_review` is not allowed
 - `claimed` and `in_progress` require an assignee
@@ -220,10 +226,15 @@ backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -
 - `completed_at` auto-set on `done`
 - when a `technical_review_dispatch` child issue is completed with a blocking review summary, the source issue is auto-returned to `in_progress` for the assigned executor
 - when a `technical_review_dispatch` child issue is completed without blocking findings, the source issue is auto-advanced to `human_review` **unless** the primary GitHub pull request on the parent is still **draft** (the parent stays in `technical_review` until the PR is ready for review)
-- non-blocking outcomes are detected from the closing or latest review comment: phrases such as `pode seguir para revisão humana`, `pronto para revisão humana`, or `aprovado/aprovada para revisão humana` (accents optional), or a `### Findings bloqueantes` / `### Blocking findings` section stating there are no blockers (e.g. `nenhum`, `none`)
+- non-blocking outcomes are detected from the closing or latest review comment using the **Portuguese and English patterns** described in [Technical review outcome text](#technical-review-outcome-text-portuguese-and-english) above
 - if the reviewer posts the summary comment first and only later closes the review child, Paperclip falls back to the latest review-summary comment to reconcile the source issue
-- if the handoff comment explicitly carries the current PR head (for example `Head atual: abc1234`), the dispatcher treats that head SHA as the diff identity even when the pull-request work product is unavailable
-- manual child issues that clearly follow the review-ticket pattern (`Revisar PR #... de ...`) are reconciled with the same parent-state rules
+- if the handoff comment explicitly carries the current PR head, the dispatcher treats that head SHA as the diff identity even when the pull-request work product is unavailable (see examples in that subsection)
+- manual child issues that clearly follow the review-ticket pattern are reconciled with the same parent-state rules (see that subsection)
 - updating a primary GitHub pull-request work product to `merged` (or `closed` with explicit merge metadata) auto-advances the source issue through any pending review states and marks it `done`
-- **Direct merge eligible:** to let the assigned **executor** be woken after a clean technical review, set the primary GitHub pull-request work product `metadata.directMergeEligible` to **`true`** (via `POST /api/issues/{issueId}/work-products` or `PATCH /api/work-products/{id}`). When the review child completes **approved** and the parent reaches `human_review` with a non-draft PR, the server enqueues a heartbeat wakeup for the parent assignee with `mutation: "review_approved_merge_delegate"` (see [Runtime runbook](/guides/board-operator/runtime-runbook)). For **GitHub** automation, include the literal substring `direct_merge_eligible` in the PR description if you use `.github/workflows/direct-merge-eligible.yml`.
+  - parent `done` plus cancellation of still-open technical-review children (`technical_review_dispatch` or legacy review title pattern) is applied in **one database transaction**; routine run sync and activity logging follow the commit (see [Runtime runbook](/guides/board-operator/runtime-runbook))
+- **Direct merge eligible**
+  - **Enable:** set the primary GitHub pull-request work product `metadata.directMergeEligible` to **`true`** using `POST /api/issues/{issueId}/work-products` or `PATCH /api/work-products/{id}`.
+  - **When it fires:** the review child completes **approved**, and the parent issue reaches **`human_review`** with a **non-draft** PR.
+  - **Effect:** the server enqueues a heartbeat wakeup for the **parent assignee** with **`mutation: "review_approved_merge_delegate"`** (see [Runtime runbook](/guides/board-operator/runtime-runbook)).
+  - **GitHub automation:** include the HTML comment **`<!-- direct_merge_eligible -->`** in the PR description (case-insensitive match; see `.github/workflows/direct-merge-eligible.yml`), in addition to any API-side `metadata.directMergeEligible` you set via Paperclip.
 - Terminal states: `done`, `cancelled`

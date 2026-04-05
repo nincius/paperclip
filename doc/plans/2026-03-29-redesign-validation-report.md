@@ -2,7 +2,7 @@
 
 Date: 2026-03-29
 Scope: validate the redesign checklist against the current Paperclip source tree
-Repo: `/Users/nincius/paperclip`
+Repo: Paperclip monorepo (`<repo-root>` — e.g. clone directory containing `server/`, `ui/`, `packages/`)
 
 ## Summary
 
@@ -34,7 +34,7 @@ Items still partial or not fully proven from code inspection alone:
 
 ### 1. Bootstrap
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
@@ -44,10 +44,10 @@ Evidence:
 
 References:
 
-- [server/src/routes/agents.ts](/Users/nincius/paperclip/server/src/routes/agents.ts)
-- [server/src/services/default-agent-instructions.ts](/Users/nincius/paperclip/server/src/services/default-agent-instructions.ts)
-- [server/src/__tests__/agent-skills-routes.test.ts](/Users/nincius/paperclip/server/src/__tests__/agent-skills-routes.test.ts)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
+- [server/src/routes/agents.ts](../../server/src/routes/agents.ts)
+- [server/src/services/default-agent-instructions.ts](../../server/src/services/default-agent-instructions.ts)
+- [server/src/__tests__/agent-skills-routes.test.ts](../../server/src/__tests__/agent-skills-routes.test.ts)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
 
 Assessment:
 
@@ -56,7 +56,7 @@ Assessment:
 
 ### 2. Guardrails
 
-Status: Partial
+Status: ⚠️ Partial
 
 Evidence:
 
@@ -67,12 +67,12 @@ Evidence:
 
 References:
 
-- [server/src/services/issues.ts](/Users/nincius/paperclip/server/src/services/issues.ts)
-- [server/src/services/heartbeat.ts](/Users/nincius/paperclip/server/src/services/heartbeat.ts)
-- [server/src/services/workspace-runtime.ts](/Users/nincius/paperclip/server/src/services/workspace-runtime.ts)
-- [server/src/services/execution-workspace-policy.ts](/Users/nincius/paperclip/server/src/services/execution-workspace-policy.ts)
-- [server/src/__tests__/issues-service.test.ts](/Users/nincius/paperclip/server/src/__tests__/issues-service.test.ts)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
+- [server/src/services/issues.ts](../../server/src/services/issues.ts)
+- [server/src/services/heartbeat.ts](../../server/src/services/heartbeat.ts)
+- [server/src/services/workspace-runtime.ts](../../server/src/services/workspace-runtime.ts)
+- [server/src/services/execution-workspace-policy.ts](../../server/src/services/execution-workspace-policy.ts)
+- [server/src/__tests__/issues-service.test.ts](../../server/src/__tests__/issues-service.test.ts)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
 
 Assessment:
 
@@ -82,24 +82,24 @@ Assessment:
 
 ### 3. States
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
 - Shared constants now define the redesigned lifecycle:
-  `backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> changes_requested -> human_review -> done|blocked|cancelled`
+  `backlog -> todo -> claimed -> in_progress -> handoff_ready -> technical_review -> human_review -> changes_requested -> blocked -> done|cancelled`
 - Allowed transitions are encoded centrally.
 - DB migration backfills legacy `in_review` rows to `handoff_ready`.
 - API docs were updated to describe the new lifecycle.
 
 References:
 
-- [packages/shared/src/constants.ts](/Users/nincius/paperclip/packages/shared/src/constants.ts)
-- [packages/shared/src/types/issue.ts](/Users/nincius/paperclip/packages/shared/src/types/issue.ts)
-- [packages/db/src/schema/issues.ts](/Users/nincius/paperclip/packages/db/src/schema/issues.ts)
-- [packages/db/src/migrations/0045_issue_review_workflow.sql](/Users/nincius/paperclip/packages/db/src/migrations/0045_issue_review_workflow.sql)
-- [docs/api/issues.md](/Users/nincius/paperclip/docs/api/issues.md)
-- [doc/SPEC-implementation.md](/Users/nincius/paperclip/doc/SPEC-implementation.md)
+- [packages/shared/src/constants.ts](../../packages/shared/src/constants.ts)
+- [packages/shared/src/types/issue.ts](../../packages/shared/src/types/issue.ts)
+- [packages/db/src/schema/issues.ts](../../packages/db/src/schema/issues.ts)
+- [packages/db/src/migrations/0045_issue_review_workflow.sql](../../packages/db/src/migrations/0045_issue_review_workflow.sql)
+- [docs/api/issues.md](../../docs/api/issues.md)
+- [doc/SPEC-implementation.md](../SPEC-implementation.md)
 
 Assessment:
 
@@ -108,7 +108,7 @@ Assessment:
 
 ### 4. Ownership
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
@@ -119,11 +119,11 @@ Evidence:
 
 References:
 
-- [packages/shared/src/types/issue.ts](/Users/nincius/paperclip/packages/shared/src/types/issue.ts)
-- [server/src/services/issues.ts](/Users/nincius/paperclip/server/src/services/issues.ts)
-- [server/src/__tests__/issues-service.test.ts](/Users/nincius/paperclip/server/src/__tests__/issues-service.test.ts)
-- [ui/src/components/IssueCurrentOwnerBadge.tsx](/Users/nincius/paperclip/ui/src/components/IssueCurrentOwnerBadge.tsx)
-- [ui/src/components/IssueProperties.tsx](/Users/nincius/paperclip/ui/src/components/IssueProperties.tsx)
+- [packages/shared/src/types/issue.ts](../../packages/shared/src/types/issue.ts)
+- [server/src/services/issues.ts](../../server/src/services/issues.ts)
+- [server/src/__tests__/issues-service.test.ts](../../server/src/__tests__/issues-service.test.ts)
+- [ui/src/components/IssueCurrentOwnerBadge.tsx](../../ui/src/components/IssueCurrentOwnerBadge.tsx)
+- [ui/src/components/IssueProperties.tsx](../../ui/src/components/IssueProperties.tsx)
 
 Assessment:
 
@@ -132,7 +132,7 @@ Assessment:
 
 ### 5. Dispatcher
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
@@ -143,10 +143,10 @@ Evidence:
 
 References:
 
-- [server/src/services/review-dispatch.ts](/Users/nincius/paperclip/server/src/services/review-dispatch.ts)
-- [server/src/routes/issues.ts](/Users/nincius/paperclip/server/src/routes/issues.ts)
-- [server/src/__tests__/review-dispatch.test.ts](/Users/nincius/paperclip/server/src/__tests__/review-dispatch.test.ts)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
+- [server/src/services/review-dispatch.ts](../../server/src/services/review-dispatch.ts)
+- [server/src/routes/issues.ts](../../server/src/routes/issues.ts)
+- [server/src/__tests__/review-dispatch.test.ts](../../server/src/__tests__/review-dispatch.test.ts)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
 
 Assessment:
 
@@ -155,7 +155,7 @@ Assessment:
 
 ### 6. Revisor Técnico
 
-Status: Partially verified
+Status: ⚠️ Partial
 
 Evidence:
 
@@ -165,9 +165,9 @@ Evidence:
 
 References:
 
-- [server/src/services/review-dispatch.ts](/Users/nincius/paperclip/server/src/services/review-dispatch.ts)
-- [server/src/services/agent-health-monitor.ts](/Users/nincius/paperclip/server/src/services/agent-health-monitor.ts)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
+- [server/src/services/review-dispatch.ts](../../server/src/services/review-dispatch.ts)
+- [server/src/services/agent-health-monitor.ts](../../server/src/services/agent-health-monitor.ts)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
 
 Assessment:
 
@@ -176,7 +176,7 @@ Assessment:
 
 ### 7. Health Monitor
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
@@ -188,10 +188,10 @@ Evidence:
 
 References:
 
-- [server/src/services/agent-health-monitor.ts](/Users/nincius/paperclip/server/src/services/agent-health-monitor.ts)
-- [server/src/__tests__/agent-health-monitor.test.ts](/Users/nincius/paperclip/server/src/__tests__/agent-health-monitor.test.ts)
-- [packages/db/src/migrations/0046_agent_health_alerts.sql](/Users/nincius/paperclip/packages/db/src/migrations/0046_agent_health_alerts.sql)
-- [packages/db/src/schema/issues.ts](/Users/nincius/paperclip/packages/db/src/schema/issues.ts)
+- [server/src/services/agent-health-monitor.ts](../../server/src/services/agent-health-monitor.ts)
+- [server/src/__tests__/agent-health-monitor.test.ts](../../server/src/__tests__/agent-health-monitor.test.ts)
+- [packages/db/src/migrations/0046_agent_health_alerts.sql](../../packages/db/src/migrations/0046_agent_health_alerts.sql)
+- [packages/db/src/schema/issues.ts](../../packages/db/src/schema/issues.ts)
 
 Assessment:
 
@@ -199,7 +199,7 @@ Assessment:
 
 ### 8. Observability
 
-Status: Partial
+Status: ⚠️ Partial
 
 Evidence:
 
@@ -210,10 +210,10 @@ Evidence:
 
 References:
 
-- [server/src/services/heartbeat-run-effect.ts](/Users/nincius/paperclip/server/src/services/heartbeat-run-effect.ts)
-- [server/src/__tests__/heartbeat-run-effect.test.ts](/Users/nincius/paperclip/server/src/__tests__/heartbeat-run-effect.test.ts)
-- [ui/src/lib/run-operational-effect.ts](/Users/nincius/paperclip/ui/src/lib/run-operational-effect.ts)
-- [ui/src/components/IssueCurrentOwnerBadge.tsx](/Users/nincius/paperclip/ui/src/components/IssueCurrentOwnerBadge.tsx)
+- [server/src/services/heartbeat-run-effect.ts](../../server/src/services/heartbeat-run-effect.ts)
+- [server/src/__tests__/heartbeat-run-effect.test.ts](../../server/src/__tests__/heartbeat-run-effect.test.ts)
+- [ui/src/lib/run-operational-effect.ts](../../ui/src/lib/run-operational-effect.ts)
+- [ui/src/components/IssueCurrentOwnerBadge.tsx](../../ui/src/components/IssueCurrentOwnerBadge.tsx)
 
 Assessment:
 
@@ -222,7 +222,7 @@ Assessment:
 
 ### 9. WIP and SLA
 
-Status: Implemented in health policy, partially verified in operator UX
+Status: ⚠️ Partial
 
 Evidence:
 
@@ -231,8 +231,8 @@ Evidence:
 
 References:
 
-- [server/src/services/agent-health-monitor.ts](/Users/nincius/paperclip/server/src/services/agent-health-monitor.ts)
-- [server/src/__tests__/agent-health-monitor.test.ts](/Users/nincius/paperclip/server/src/__tests__/agent-health-monitor.test.ts)
+- [server/src/services/agent-health-monitor.ts](../../server/src/services/agent-health-monitor.ts)
+- [server/src/__tests__/agent-health-monitor.test.ts](../../server/src/__tests__/agent-health-monitor.test.ts)
 
 Assessment:
 
@@ -241,7 +241,7 @@ Assessment:
 
 ### 10. Rotinas
 
-Status: Partial
+Status: ⚠️ Partial
 
 Evidence:
 
@@ -250,8 +250,8 @@ Evidence:
 
 References:
 
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
-- [server/src/services/review-dispatch.ts](/Users/nincius/paperclip/server/src/services/review-dispatch.ts)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
+- [server/src/services/review-dispatch.ts](../../server/src/services/review-dispatch.ts)
 
 Assessment:
 
@@ -260,7 +260,7 @@ Assessment:
 
 ### 11. Regression Workflow
 
-Status: Not fully verified
+Status: ❌ Not Verified
 
 Evidence:
 
@@ -269,8 +269,8 @@ Evidence:
 
 References:
 
-- [docs/api/issues.md](/Users/nincius/paperclip/docs/api/issues.md)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
+- [docs/api/issues.md](../../docs/api/issues.md)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
 
 Assessment:
 
@@ -279,7 +279,7 @@ Assessment:
 
 ### 12. Documentation
 
-Status: Implemented
+Status: ✅ Implemented
 
 Evidence:
 
@@ -289,9 +289,9 @@ Evidence:
 
 References:
 
-- [docs/api/issues.md](/Users/nincius/paperclip/docs/api/issues.md)
-- [docs/guides/board-operator/runtime-runbook.md](/Users/nincius/paperclip/docs/guides/board-operator/runtime-runbook.md)
-- [doc/SPEC-implementation.md](/Users/nincius/paperclip/doc/SPEC-implementation.md)
+- [docs/api/issues.md](../../docs/api/issues.md)
+- [docs/guides/board-operator/runtime-runbook.md](../../docs/guides/board-operator/runtime-runbook.md)
+- [doc/SPEC-implementation.md](../SPEC-implementation.md)
 
 Assessment:
 
@@ -299,7 +299,7 @@ Assessment:
 
 ## Overall Assessment
 
-Current status: mostly implemented, not yet fully proven.
+Current status: ⚠️ Partial — structurally strong in code; ❌ Not Verified for full end-to-end runtime proof in this review.
 
 What looks genuinely complete:
 

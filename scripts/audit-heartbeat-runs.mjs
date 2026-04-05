@@ -12,8 +12,10 @@
  *   PAPERCLIP_TOKEN — optional Bearer for authenticated board API
  *   AUDIT_RUNS_LIMIT — max rows for company-wide list (default 500, max 1000)
  *   AGENT_SAMPLE_LIMIT — per-agent sample size (default 30, max 200)
- *   AUDIT_DAYS — only include runs with createdAt within this many days (default 7, 0 = all)
- *   STUCK_RUNNING_MS — flag running runs whose startedAt is older than this (default 7200000 = 2h)
+ *   AUDIT_DAYS — only include runs with createdAt within this many days (default 7, 0 = all; explicit 0 is honored)
+ *   STUCK_RUNNING_MS — flag running runs whose startedAt is older than this (default 7200000 = 2h; explicit 0 is honored)
+ *
+ * Per-agent heartbeat-runs fetches run in parallel batches (~15) with a 10s timeout per request.
  *
  * @see doc/plans/2026-04-03-heartbeat-runs-sampling-and-triage.md for SQL equivalents and P0/P1 triage.
  */
@@ -30,11 +32,21 @@ const agentSampleLimit = Math.min(
   200,
   Math.max(1, parseInt(process.env.AGENT_SAMPLE_LIMIT ?? "30", 10) || 30),
 );
-const auditDays = Math.max(0, parseInt(process.env.AUDIT_DAYS ?? "7", 10) || 7);
+const DEFAULT_AUDIT_DAYS = 7;
+const DEFAULT_STUCK_RUNNING_MS = 2 * 60 * 60 * 1000;
+const parsedAuditDays = parseInt(process.env.AUDIT_DAYS ?? String(DEFAULT_AUDIT_DAYS), 10);
+const auditDays = Math.max(0, Number.isNaN(parsedAuditDays) ? DEFAULT_AUDIT_DAYS : parsedAuditDays);
+const parsedStuckRunningMs = parseInt(
+  process.env.STUCK_RUNNING_MS ?? String(DEFAULT_STUCK_RUNNING_MS),
+  10,
+);
 const stuckRunningMs = Math.max(
   0,
-  parseInt(process.env.STUCK_RUNNING_MS ?? String(2 * 60 * 60 * 1000), 10) || 2 * 60 * 60 * 1000,
+  Number.isNaN(parsedStuckRunningMs) ? DEFAULT_STUCK_RUNNING_MS : parsedStuckRunningMs,
 );
+
+const PER_AGENT_FETCH_TIMEOUT_MS = 10000;
+const PER_AGENT_FETCH_BATCH_SIZE = 15;
 
 function authHeaders() {
   const headers = { Accept: "application/json" };
@@ -139,12 +151,22 @@ async function main() {
     }
   }
 
-  const perAgent = [];
-  for (const agent of agents) {
-    const rRes = await fetch(
-      `${baseUrl}/api/companies/${companyId}/heartbeat-runs?agentId=${encodeURIComponent(agent.id)}&limit=${agentSampleLimit}`,
-      { headers: authHeaders() },
-    );
+  async function sampleRunsForAgent(agent) {
+    let rRes;
+    try {
+      rRes = await fetch(
+        `${baseUrl}/api/companies/${companyId}/heartbeat-runs?agentId=${encodeURIComponent(agent.id)}&limit=${agentSampleLimit}`,
+        { headers: authHeaders(), signal: AbortSignal.timeout(PER_AGENT_FETCH_TIMEOUT_MS) },
+      );
+    } catch (err) {
+      if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+        console.error(
+          `GET heartbeat-runs timed out for agent=${agent.id} (${agent.name ?? "unnamed"})`,
+        );
+        process.exit(1);
+      }
+      throw err;
+    }
     if (!rRes.ok) {
       console.error(`GET heartbeat-runs agent=${agent.id} -> ${rRes.status}`);
       process.exit(1);
@@ -153,7 +175,7 @@ async function main() {
     const sample = Array.isArray(runs) ? runs.filter((r) => withinWindow(r.createdAt, cutoffMs)) : [];
     const fail = sample.filter((r) => r.status === "failed" || r.status === "timed_out");
     const lastFail = fail[0] ?? null;
-    perAgent.push({
+    return {
       agentId: agent.id,
       name: agent.name,
       adapterType: agent.adapterType,
@@ -167,7 +189,14 @@ async function main() {
             finishedAt: lastFail.finishedAt,
           }
         : null,
-    });
+    };
+  }
+
+  const perAgent = [];
+  for (let i = 0; i < agents.length; i += PER_AGENT_FETCH_BATCH_SIZE) {
+    const batch = agents.slice(i, i + PER_AGENT_FETCH_BATCH_SIZE);
+    const batchRows = await Promise.all(batch.map((agent) => sampleRunsForAgent(agent)));
+    perAgent.push(...batchRows);
   }
 
   const payload = {

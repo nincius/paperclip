@@ -32,6 +32,14 @@ const mockSecretService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockFindServerAdapter = vi.hoisted(() => vi.fn());
+const mockListAdapterModels = vi.hoisted(() => vi.fn());
+const mockFsMkdir = vi.hoisted(() => vi.fn());
+const mockFsStat = vi.hoisted(() => vi.fn());
+const mockFsLstat = vi.hoisted(() => vi.fn());
+const mockFsRm = vi.hoisted(() => vi.fn());
+const mockFsSymlink = vi.hoisted(() => vi.fn());
+const mockFsWriteFile = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -50,9 +58,55 @@ vi.mock("../services/index.js", () => ({
 }));
 
 vi.mock("../adapters/index.js", () => ({
-  findServerAdapter: vi.fn(),
-  listAdapterModels: vi.fn(),
+  findServerAdapter: mockFindServerAdapter,
+  listAdapterModels: mockListAdapterModels,
 }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const mocked = {
+    ...actual,
+    mkdir: mockFsMkdir,
+    stat: mockFsStat,
+    lstat: mockFsLstat,
+    rm: mockFsRm,
+    symlink: mockFsSymlink,
+    writeFile: mockFsWriteFile,
+  };
+  return {
+    ...mocked,
+    default: mocked,
+  };
+});
+
+/** Minimal fs.Stats-like object for mocks (covers route + ensure-agent-daily-memory lstat checks). */
+function mockFsStatsLike(options: {
+  isFile?: boolean;
+  isDirectory?: boolean;
+  isSymbolicLink?: boolean;
+  size?: number;
+} = {}) {
+  const isFile = options.isFile ?? true;
+  const isDirectory = options.isDirectory ?? false;
+  const isSymbolicLink = options.isSymbolicLink ?? false;
+  return {
+    size: options.size ?? 12,
+    isFile: () => isFile,
+    isDirectory: () => isDirectory,
+    isSymbolicLink: () => isSymbolicLink,
+    isBlockDevice: () => false,
+    isCharacterDevice: () => false,
+    isFIFO: () => false,
+    isSocket: () => false,
+  };
+}
+
+function enoentError(): NodeJS.ErrnoException {
+  const err = new Error("ENOENT: no such file or directory") as NodeJS.ErrnoException;
+  err.code = "ENOENT";
+  err.errno = -2;
+  return err;
+}
 
 function createApp() {
   const app = express();
@@ -70,6 +124,27 @@ function createApp() {
   app.use("/api", agentRoutes({} as any));
   app.use(errorHandler);
   return app;
+}
+
+/** Minimal fs.Stats-like object for route tests that call `fs.stat` / `fs.lstat` in `agents.ts`. */
+function createMockFileStats(overrides?: { size?: number }) {
+  return {
+    size: overrides?.size ?? 12,
+    isFile: () => true,
+    isDirectory: () => false,
+    isSymbolicLink: () => false,
+    isBlockDevice: () => false,
+    isCharacterDevice: () => false,
+    isFIFO: () => false,
+    isSocket: () => false,
+  };
+}
+
+function createEnoentError(): NodeJS.ErrnoException {
+  const err = new Error("ENOENT: no such file or directory, lstat '…'") as NodeJS.ErrnoException;
+  err.code = "ENOENT";
+  err.errno = -2;
+  return err;
 }
 
 function makeAgent() {
@@ -93,6 +168,19 @@ function makeAgent() {
 describe("agent instructions bundle routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFindServerAdapter.mockReturnValue({
+      testEnvironment: vi.fn().mockResolvedValue({ checks: [] }),
+    });
+    mockListAdapterModels.mockResolvedValue([]);
+    mockFsMkdir.mockResolvedValue(undefined);
+    mockFsStat.mockResolvedValue(mockFsStatsLike({ isFile: true, isDirectory: false }));
+    mockFsLstat.mockRejectedValue(enoentError());
+    mockFsRm.mockResolvedValue(undefined);
+    mockFsSymlink.mockResolvedValue(undefined);
+    mockFsWriteFile.mockResolvedValue(undefined);
+    mockSecretService.resolveAdapterConfigForRuntime.mockImplementation(
+      async (_companyId: string, config: Record<string, unknown>) => ({ config }),
+    );
     mockAgentService.getById.mockResolvedValue(makeAgent());
     mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeAgent(),
@@ -110,16 +198,48 @@ describe("agent instructions bundle routes", () => {
       warnings: [],
       legacyPromptTemplateActive: false,
       legacyBootstrapPromptTemplateActive: false,
-      files: [{
-        path: "AGENTS.md",
-        size: 12,
-        language: "markdown",
-        markdown: true,
-        isEntryFile: true,
-        editable: true,
-        deprecated: false,
-        virtual: false,
-      }],
+      files: [
+        {
+          path: "AGENTS.md",
+          size: 12,
+          language: "markdown",
+          markdown: true,
+          isEntryFile: true,
+          editable: true,
+          deprecated: false,
+          virtual: false,
+        },
+        {
+          path: "HEARTBEAT.md",
+          size: 12,
+          language: "markdown",
+          markdown: true,
+          isEntryFile: false,
+          editable: true,
+          deprecated: false,
+          virtual: false,
+        },
+        {
+          path: "SOUL.md",
+          size: 12,
+          language: "markdown",
+          markdown: true,
+          isEntryFile: false,
+          editable: true,
+          deprecated: false,
+          virtual: false,
+        },
+        {
+          path: "TOOLS.md",
+          size: 12,
+          language: "markdown",
+          markdown: true,
+          isEntryFile: false,
+          editable: true,
+          deprecated: false,
+          virtual: false,
+        },
+      ],
     });
     mockAgentInstructionsService.readFile.mockResolvedValue({
       path: "AGENTS.md",

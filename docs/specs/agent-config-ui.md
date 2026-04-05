@@ -140,7 +140,7 @@ Each section is a collapsible card. Save happens per-field (PATCH on blur/enter)
 
 #### Runs Tab
 
-This is the primary activity/history view. Shows a paginated list of heartbeat runs, most recent first.
+This is the primary activity/history view: a **single-page window** of heartbeat runs, **newest first**, loaded with `GET /companies/:companyId/heartbeat-runs?agentId=<agentId>&limit=<n>`. The API is **not cursor- or offset-paged** — there is no `nextCursor`, `offset`, or `hasMore`; the response is a **JSON array** whose length is at most **`limit`** (default **100**, maximum **1000**). To see older runs, increase **`limit`** (capped at 1000) or add future server support. The embedded **log viewer** uses `GET /heartbeat-runs/:id/events?afterSeq=&limit=` (default event **`limit` 200** on the wire) — a separate knob from the runs list **`limit`**.
 
 **Run list item:**
 ```
@@ -264,7 +264,7 @@ All endpoints already exist. No new server work needed for V1.
 | Create API key | `POST /agents/:id/keys` | Overflow menu |
 | Get runtime state | `GET /agents/:id/runtime-state` | Overview tab, properties panel |
 | Invoke/Wakeup | `POST /agents/:id/heartbeat/invoke` | Header invoke button |
-| List runs | `GET /companies/:id/heartbeat-runs?agentId=X&limit=N` (default limit 200) | Runs tab |
+| List runs | `GET /companies/:id/heartbeat-runs?agentId=X&limit=N` (default **100**, max **1000**; newest-first array, no cursor/offset) | Runs tab |
 | Cancel run | `POST /heartbeat-runs/:id/cancel` | Run detail |
 | Run events | `GET /heartbeat-runs/:id/events` | Log viewer |
 | Run log | `GET /heartbeat-runs/:id/log` | Full log view |

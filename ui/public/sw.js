@@ -24,22 +24,30 @@ self.addEventListener("fetch", (event) => {
 
   // Network-first for everything — cache is only an offline fallback
   event.respondWith(
-    fetch(request)
-      .then((response) => {
+    (async () => {
+      try {
+        const response = await fetch(request);
         if (response.ok && url.origin === self.location.origin) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(request, clone);
         }
         return response;
-      })
-      .catch(() => {
+      } catch {
         // Synthetic 503: only used when fetch() rejects (e.g. server down, connection reset).
         // On localhost, prefer disabling SW registration (see ui/src/main.tsx) to avoid false
         // "503" after brief Paperclip restarts.
-        if (request.mode === "navigate") {
-          return caches.match("/") || new Response("Offline", { status: 503 });
+        try {
+          if (request.mode === "navigate") {
+            const cached = await caches.match("/");
+            return cached ?? new Response("Offline", { status: 503 });
+          }
+          const cached = await caches.match(request);
+          return cached ?? new Response("Offline", { status: 503 });
+        } catch {
+          return new Response("Offline", { status: 503 });
         }
-        return caches.match(request);
-      })
+      }
+    })()
   );
 });

@@ -1,3 +1,4 @@
+import { OPEN_ISSUE_STATUSES } from "@paperclipai/shared";
 import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
@@ -10,6 +11,10 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+
+const openIssueStatusInSql = sql.raw(
+  OPEN_ISSUE_STATUSES.map((status) => `'${status.replaceAll("'", "''")}'`).join(", "),
+);
 import { agents } from "./agents.js";
 import { projects } from "./projects.js";
 import { goals } from "./goals.js";
@@ -83,35 +88,18 @@ export const issues = pgTable(
           and ${table.originId} is not null
           and ${table.hiddenAt} is null
           and ${table.executionRunId} is not null
-          and ${table.status} in (
-            'backlog',
-            'todo',
-            'claimed',
-            'in_progress',
-            'handoff_ready',
-            'technical_review',
-            'changes_requested',
-            'human_review',
-            'blocked'
-          )`,
+          and ${table.status} in (${openIssueStatusInSql})`,
       ),
     openAgentHealthAlertIdx: uniqueIndex("issues_open_agent_health_alert_uq")
-      .on(table.companyId, table.originKind, table.originId)
+      .on(table.companyId, table.originId)
       .where(
         sql`${table.originKind} = 'agent_health_alert'
           and ${table.originId} is not null
           and ${table.hiddenAt} is null
-          and ${table.status} in (
-            'backlog',
-            'todo',
-            'claimed',
-            'in_progress',
-            'handoff_ready',
-            'technical_review',
-            'changes_requested',
-            'human_review',
-            'blocked'
-          )`,
+          and ${table.status} in (${openIssueStatusInSql})`,
       ),
+    agentHealthAlertHistoricalLookupIdx: index("issues_agent_health_alert_historical_lookup_idx")
+      .on(table.updatedAt)
+      .where(sql`${table.originKind} = 'agent_health_alert' and ${table.hiddenAt} is null`),
   }),
 );

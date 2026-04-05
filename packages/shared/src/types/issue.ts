@@ -94,17 +94,47 @@ export interface LegacyPlanDocument {
   source: "issue_description";
 }
 
-export type IssueCurrentOwnerActorType = "agent" | "user" | "board" | "unassigned";
-
 export type IssueCurrentOwnerRole = "assignee" | "technical_reviewer" | "human_reviewer" | "queue";
 
-export interface IssueCurrentOwner {
-  actorType: IssueCurrentOwnerActorType;
+export type IssueCurrentOwnerAgent = {
+  actorType: "agent";
   role: IssueCurrentOwnerRole;
-  agentId: string | null;
-  userId: string | null;
+  agentId: string;
+  userId: null;
   label: string;
-}
+};
+
+export type IssueCurrentOwnerUser = {
+  actorType: "user";
+  role: IssueCurrentOwnerRole;
+  agentId: null;
+  userId: string;
+  label: string;
+};
+
+export type IssueCurrentOwnerBoard = {
+  actorType: "board";
+  role: IssueCurrentOwnerRole;
+  agentId: null;
+  userId: null;
+  label: string;
+};
+
+export type IssueCurrentOwnerUnassigned = {
+  actorType: "unassigned";
+  role: IssueCurrentOwnerRole;
+  agentId: null;
+  userId: null;
+  label: string;
+};
+
+export type IssueCurrentOwner =
+  | IssueCurrentOwnerAgent
+  | IssueCurrentOwnerUser
+  | IssueCurrentOwnerBoard
+  | IssueCurrentOwnerUnassigned;
+
+export type IssueCurrentOwnerActorType = IssueCurrentOwner["actorType"];
 
 export interface Issue {
   id: string;

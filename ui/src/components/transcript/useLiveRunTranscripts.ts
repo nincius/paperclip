@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { LiveEvent } from "@paperclipai/shared";
+import type { HeartbeatRunStatus, LiveEvent } from "@paperclipai/shared";
 import { instanceSettingsApi } from "../../api/instanceSettings";
 import { heartbeatsApi, type LiveRunForIssue } from "../../api/heartbeats";
 import { buildTranscript, getUIAdapter, type RunLogChunk, type TranscriptEntry } from "../../adapters";
 import { queryKeys } from "../../lib/queryKeys";
-import { filterRunsForLogPolling, isTerminalRunStatus } from "../../lib/liveRunLogPoll";
+import { filterRunsForLogPolling, TERMINAL_RUN_STATUSES } from "../../lib/liveRunLogPoll";
 
 const LOG_POLL_INTERVAL_MS = 2000;
 const LOG_READ_LIMIT_BYTES = 256_000;
@@ -71,8 +71,9 @@ export function useLiveRunTranscripts({
   });
 
   const runById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs]);
+  // Keep terminal membership aligned with TERMINAL_RUN_STATUSES in liveRunLogPoll (same as filterRunsForLogPolling).
   const activeRunIds = useMemo(
-    () => new Set(runs.filter((run) => !isTerminalRunStatus(run.status)).map((run) => run.id)),
+    () => new Set(runs.filter((run) => !TERMINAL_RUN_STATUSES.has(run.status)).map((run) => run.id)),
     [runs],
   );
   const runsForLogPoll = useMemo(() => filterRunsForLogPolling(runs), [runs]);
@@ -240,7 +241,11 @@ export function useLiveRunTranscripts({
           const status = readString(payload["status"]) ?? "updated";
           appendChunks(runId, [{
             ts: event.createdAt,
-            stream: isTerminalRunStatus(status) && status !== "succeeded" ? "stderr" : "system",
+            // WebSocket payload is untyped string; terminal check matches TERMINAL_RUN_STATUSES (see activeRunIds).
+            stream:
+              TERMINAL_RUN_STATUSES.has(status as HeartbeatRunStatus) && status !== "succeeded"
+                ? "stderr"
+                : "system",
             chunk: `run ${status}`,
             dedupeKey: `socket:status:${runId}:${status}:${readString(payload["finishedAt"]) ?? ""}`,
           }]);

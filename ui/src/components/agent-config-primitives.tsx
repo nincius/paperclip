@@ -49,7 +49,8 @@ export const help: Record<string, string> = {
   webhookUrl: "The URL that receives POST requests when the agent is invoked.",
   heartbeatInterval: "Run this agent automatically on a timer. Useful for periodic tasks like checking for new work.",
   intervalSec: "Seconds between automatic heartbeat invocations.",
-  timeoutSec: "Maximum seconds a run can take before being terminated. 0 means no timeout.",
+  timeoutSec:
+    "Maximum seconds a run can take before being terminated. 0 or empty uses the server default (3600s) for local CLI adapters so one run cannot block the queue indefinitely; set a positive value to override.",
   graceSec: "Seconds to wait after sending interrupt before force-killing the process.",
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",

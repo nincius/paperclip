@@ -67,11 +67,22 @@ For local adapters, set:
 - optional env vars and extra CLI args
 - use **Test environment** in agent configuration to run adapter-specific diagnostics before saving
 
+### Per-agent API URL / key overrides (one agent reports API down, others work)
+
+If **`curl http://127.0.0.1:3100/api/health`** (or your real bind URL) returns **200** from the same host but **a single agent** (for example **Coordenador**) still logs **503**, connection errors, or “API unavailable”, the server is fine—the child process for that agent is almost certainly using a **wrong base URL or key**.
+
+- **`opencode_local` / `codex_local` / `process`:** `adapterConfig.env` copies **string** entries into the adapter child environment **after** [`buildPaperclipEnv`](https://github.com/paperclip-ai/paperclip/blob/master/packages/adapter-utils/src/server-utils.ts) sets defaults from the running server. An explicit **`PAPERCLIP_API_URL`** or **`PAPERCLIP_API_KEY`** there **overrides** the injected values. Remove obsolete entries (old port, hostname the CLI cannot reach, Docker-only hostnames) or set **`PAPERCLIP_API_URL`** to the same origin you use successfully with `curl` (often `http://127.0.0.1:3100` for private loopback).
+- **`openclaw_gateway`:** optional **`paperclipApiUrl`** overrides the Paperclip base URL passed into the gateway path; fix or clear it if it does not match a reachable listener.
+
+**What to do:** open the board → that agent → **Agent configuration** → inspect **Adapter configuration** JSON. Compare with an agent that works (same `adapterType`). Clear `env.PAPERCLIP_API_URL` / `env.PAPERCLIP_API_KEY` unless you intentionally override them, then **Save** and **Test environment**.
+
 ## 3.4 Managed agents → OpenCode + free preset (default rollout)
 
 For the usual Portuguese-named roles (*Claudio*, *Coordenador*, *Triagem*, *Segurança*, *Revisor*, *CEO*), repo scripts target **`opencode_local`** with a **Minimax M2.5 (free)** model by default (`opencode/minimax-m2.5-free`). Confirm with `opencode models` on the host (available ids differ by OpenCode version). To use **Qwen**, **Nemotron**, **GPT‑5 Nano**, etc., set `PAPERCLIP_OPENCODE_QUOTA_FALLBACK_MODEL` (for example `opencode/qwen3.6-plus-free` or `openrouter/...`).
 
 Rollout scripts only patch **name-matched** roles unless you pass **`--all-agents`**, which updates **every** non-terminated `codex_local` / `opencode_local` agent in the company.
+
+With **`--apply`**, agents already on **`opencode_local`** with `adapterConfig.model` equal to the resolved quota fallback id are listed in the dry-run output but **not** PATCHed again.
 
 Only agents whose `adapterType` is **`codex_local`** or **`opencode_local`** are matched by rollouts (other adapters are left alone).
 
@@ -95,14 +106,13 @@ If you keep agents on Codex instead of the managed OpenCode rollout, set `adapte
 
 ### Audit latest runs vs managed preset
 
-`GET /api/companies/:id/heartbeat-runs` stores `usageJson.model`. Compare to config and the managed target model (`DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL` or env override):
+`GET /api/companies/:id/heartbeat-runs` stores `usageJson.model`. Compare to config and the managed target model (`DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL` from `@paperclipai/shared` / `packages/shared/src/opencode-defaults.mjs`, or env override):
 
 ```sh
 export PAPERCLIP_COMPANY_ID="<company-uuid>"
 pnpm audit:agent-models                           # dry-run table
-pnpm audit:agent-models -- --apply-nemotron       # PATCH managed roles only (flag name is legacy)
+pnpm audit:agent-models -- --apply-nemotron       # PATCH managed roles only (current recommended flag)
 pnpm audit:agent-models -- --apply-all            # PATCH all opencode_local / codex_local in company
-# --apply-codex / --apply-opencode are deprecated aliases for --apply-nemotron
 ```
 
 Optional: `RUNS_LIMIT=600` to scan more rows.

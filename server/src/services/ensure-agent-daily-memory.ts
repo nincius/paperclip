@@ -37,7 +37,11 @@ export async function ensureDailyMemoryNoteUnderAgentHome(
   const filePath = path.join(memoryDir, `${ymd}.md`);
   const stat = await fs.lstat(filePath).catch(() => null);
   if (stat?.isFile()) return;
-  if (stat?.isDirectory()) {
+  // Symlinks are not files for lstat; unlink the link only (never follow) so writeFile cannot
+  // clobber an arbitrary target. Directories use rm on the path entry only.
+  if (stat?.isSymbolicLink()) {
+    await fs.unlink(filePath);
+  } else if (stat?.isDirectory()) {
     await fs.rm(filePath, { recursive: true, force: true });
   }
   await fs.writeFile(filePath, dailyNoteStub(ymd), "utf8");

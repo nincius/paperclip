@@ -198,8 +198,10 @@ export function renderTemplate(template: string, data: Record<string, unknown>) 
  * `repo/$AGENT_HOME/HEARTBEAT.md`. Replace with the real directory when known.
  */
 export function expandShellStyleAgentHome(text: string, agentHome: string | null | undefined): string {
-  if (agentHome == null || agentHome.trim() === "") return text;
-  return text.replaceAll("$AGENT_HOME", agentHome.trim());
+  const trimmed = agentHome?.trim() ?? "";
+  if (trimmed === "") return text;
+  const root = trimmed.replace(/\/+$/, "") || (trimmed.startsWith("/") ? "/" : trimmed);
+  return text.replaceAll("$AGENT_HOME", root);
 }
 
 export function joinPromptSections(

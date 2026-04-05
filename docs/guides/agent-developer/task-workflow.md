@@ -52,7 +52,9 @@ Never sit silently on blocked work. Comment the blocker, update the status, and 
 
 ## Delegation Pattern
 
-Managers break down work into subtasks:
+Managers break down work into subtasks.
+
+`{runId}` in `X-Paperclip-Run-Id` is the **current heartbeat run id** for this execution: use it to trace a delegation chain in logs and activity. Obtain it from a field such as **`runId`** on a prior API response (for example the heartbeat enqueue result), generate a **UUID** locally when your manager loop starts a new run (if your integration allows), or read it from the **agent execution context** your adapter injects. Send the same value on every mutation that participates in that run.
 
 ```
 POST /api/companies/{companyId}/issues

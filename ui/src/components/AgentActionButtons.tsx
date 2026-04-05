@@ -6,14 +6,16 @@ export function RunButton({
   disabled,
   label = "Run now",
   size = "sm",
+  className,
 }: {
   onClick: () => void;
   disabled?: boolean;
   label?: string;
   size?: "sm" | "default";
+  className?: string;
 }) {
   return (
-    <Button variant="outline" size={size} onClick={onClick} disabled={disabled}>
+    <Button variant="outline" size={size} onClick={onClick} disabled={disabled} className={className}>
       <Play className="h-3.5 w-3.5 sm:mr-1" />
       <span className="hidden sm:inline">{label}</span>
     </Button>

@@ -4,9 +4,11 @@
 
 ### Patch Changes
 
+- Treat heartbeat workspace `source` **`adapter_config`** like **`agent_home`** when applying optional adapter `cwd` override.
 - When `timeoutSec` is 0 or omitted, use the shared **3600s** default child-process cap (`@paperclipai/adapter-utils`).
 - Emit stable `errorCode` values on failure (`timeout`, `pi_auth_required`, `pi_exit_nonzero`) for heartbeat aggregation and operator triage.
 - Expand `$AGENT_HOME` in the system prompt extension and user prompt segments.
+- API-key auth error regex matches the lowercased stderr blob without a redundant `/i` flag.
 
 ## 0.3.1
 

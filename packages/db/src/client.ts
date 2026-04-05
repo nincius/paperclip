@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
-import { migrate as migratePg } from "drizzle-orm/postgres-js/migrator";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
@@ -32,6 +31,63 @@ function splitMigrationStatements(content: string): string[] {
     .split("--> statement-breakpoint")
     .map((statement) => statement.trim())
     .filter((statement) => statement.length > 0);
+}
+
+function stripLeadingSqlComments(sqlText: string): string {
+  let s = sqlText.trimStart();
+  while (s.length > 0) {
+    if (s.startsWith("--")) {
+      const lineEnd = s.indexOf("\n");
+      if (lineEnd === -1) return "";
+      s = s.slice(lineEnd + 1).trimStart();
+      continue;
+    }
+    if (s.startsWith("/*")) {
+      const close = s.indexOf("*/", 2);
+      if (close === -1) break;
+      s = s.slice(close + 2).trimStart();
+      continue;
+    }
+    break;
+  }
+  return s;
+}
+
+/** Postgres forbids CREATE/DROP INDEX CONCURRENTLY inside a transaction. */
+function requiresNonTransactionalStatementExecution(statement: string): boolean {
+  const head = stripLeadingSqlComments(statement).slice(0, 220).toLowerCase();
+  return (
+    /^\s*create\s+(unique\s+)?index\s+concurrently\b/.test(head) ||
+    /^\s*drop\s+index\s+concurrently\b/.test(head)
+  );
+}
+
+async function runMigrationStatementsWithConcurrentIndexes(
+  sql: ReturnType<typeof postgres>,
+  migrationContent: string,
+): Promise<void> {
+  const statements = splitMigrationStatements(migrationContent);
+  let transactionalBuffer: string[] = [];
+
+  const flushTransactional = async () => {
+    if (transactionalBuffer.length === 0) return;
+    await runInTransaction(sql, async () => {
+      for (const stmt of transactionalBuffer) {
+        await sql.unsafe(stmt);
+      }
+    });
+    transactionalBuffer = [];
+  };
+
+  for (const statement of statements) {
+    if (requiresNonTransactionalStatementExecution(statement)) {
+      await flushTransactional();
+      await sql.unsafe(statement);
+    } else {
+      transactionalBuffer.push(statement);
+    }
+  }
+  await flushTransactional();
 }
 
 export type MigrationState =
@@ -259,11 +315,9 @@ async function applyPendingMigrationsManually(
       );
       if (existingEntry) continue;
 
-      await runInTransaction(sql, async () => {
-        for (const statement of splitMigrationStatements(migrationContent)) {
-          await sql.unsafe(statement);
-        }
+      await runMigrationStatementsWithConcurrentIndexes(sql, migrationContent);
 
+      await runInTransaction(sql, async () => {
         await recordMigrationHistoryEntry(
           sql,
           qualifiedTable,
@@ -391,9 +445,32 @@ async function migrationStatementAlreadyApplied(
     return columnExists(sql, addColumnMatch[1], addColumnMatch[2]);
   }
 
+  const createIndexConcurrentMatch = normalized.match(
+    /^CREATE (?:UNIQUE )?INDEX CONCURRENTLY (?:IF NOT EXISTS )?"([^"]+)"/i,
+  );
+  if (createIndexConcurrentMatch) {
+    return indexExists(sql, createIndexConcurrentMatch[1]);
+  }
+
   const createIndexMatch = normalized.match(/^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)"/i);
   if (createIndexMatch) {
     return indexExists(sql, createIndexMatch[1]);
+  }
+
+  const dropIndexConcurrentMatch = normalized.match(/^DROP INDEX CONCURRENTLY IF EXISTS "([^"]+)"/i);
+  if (dropIndexConcurrentMatch) {
+    const indexName = dropIndexConcurrentMatch[1];
+    return !(await indexExists(sql, indexName));
+  }
+
+  const alterIndexRenameMatch = normalized.match(
+    /^ALTER INDEX "([^"]+)" RENAME TO "([^"]+)"/i,
+  );
+  if (alterIndexRenameMatch) {
+    const [, fromName, toName] = alterIndexRenameMatch;
+    const toExists = await indexExists(sql, toName);
+    const fromExists = await indexExists(sql, fromName);
+    return toExists && !fromExists;
   }
 
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
@@ -662,13 +739,10 @@ export async function applyPendingMigrations(url: string): Promise<void> {
   if (initialState.status === "upToDate") return;
 
   if (initialState.reason === "no-migration-journal-empty-db") {
-    const sql = createUtilitySql(url);
-    try {
-      const db = drizzlePg(sql);
-      await migratePg(db, { migrationsFolder: MIGRATIONS_FOLDER });
-    } finally {
-      await sql.end();
-    }
+    // Drizzle's `migrate()` runs every statement inside a single transaction, which Postgres
+    // rejects for CREATE/DROP INDEX CONCURRENTLY. Apply the full journal via the manual runner instead.
+    const allMigrations = await orderMigrationsByJournal(await listMigrationFiles());
+    await applyPendingMigrationsManually(url, allMigrations);
 
     let bootstrappedState = await inspectMigrations(url);
     if (bootstrappedState.status === "upToDate") return;
@@ -744,14 +818,14 @@ export async function migratePostgresIfEmpty(url: string): Promise<MigrationBoot
     if (tableCount > 0) {
       return { migrated: false, reason: "not-empty-no-migration-journal", tableCount };
     }
-
-    const db = drizzlePg(sql);
-    await migratePg(db, { migrationsFolder: MIGRATIONS_FOLDER });
-
-    return { migrated: true, reason: "migrated-empty-db", tableCount: 0 };
   } finally {
     await sql.end();
   }
+
+  const allMigrations = await orderMigrationsByJournal(await listMigrationFiles());
+  await applyPendingMigrationsManually(url, allMigrations);
+
+  return { migrated: true, reason: "migrated-empty-db", tableCount: 0 };
 }
 
 export async function ensurePostgresDatabase(

@@ -46,7 +46,8 @@ describe("summarizeHeartbeatRunOperationalEffect", () => {
     expect(effect.producedEffect).toBe(true);
     expect(effect.activityCount).toBe(2);
     expect(effect.actions).toEqual(["issue.comment_added", "issue.updated"]);
-    expect(effect.signals).toEqual(["handoffs", "comments", "statusChanges"]);
+    expect(effect.signals).toHaveLength(3);
+    expect(effect.signals).toEqual(expect.arrayContaining(["handoffs", "comments", "statusChanges"]));
     expect(effect.counts.comments).toBe(1);
     expect(effect.counts.statusChanges).toBe(1);
     expect(effect.counts.handoffs).toBe(1);

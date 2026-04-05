@@ -4,9 +4,9 @@ import {
   resolveOpencodeQuotaFallbackModel,
 } from "./agent-rollout-presets.mjs";
 
-export async function fetchManagedNemotronRolloutPlan({ baseUrl, companyId, authHeaders }) {
-  const model = resolveOpencodeQuotaFallbackModel();
+const PATCH_TIMEOUT_MS = 30_000;
 
+async function fetchAgentsForCompany(baseUrl, companyId, authHeaders) {
   const listUrl = `${baseUrl}/api/companies/${companyId}/agents`;
   const listRes = await fetch(listUrl, { headers: authHeaders });
   if (!listRes.ok) {
@@ -18,8 +18,17 @@ export async function fetchManagedNemotronRolloutPlan({ baseUrl, companyId, auth
   if (!Array.isArray(agents)) {
     throw new Error("Unexpected response: expected agents array");
   }
+  return agents;
+}
 
-  const targets = agents.filter((a) => managedAgentNemotronPreset(a) !== null);
+export async function fetchManagedNemotronRolloutPlan({ baseUrl, companyId, authHeaders }) {
+  const model = resolveOpencodeQuotaFallbackModel();
+
+  const agents = await fetchAgentsForCompany(baseUrl, companyId, authHeaders);
+
+  const targets = agents.filter(
+    (a) => a.status !== "terminated" && managedAgentNemotronPreset(a) !== null,
+  );
   const skipped = agents.filter(
     (a) =>
       (a.adapterType === "codex_local" || a.adapterType === "opencode_local") &&
@@ -34,17 +43,7 @@ export async function fetchManagedNemotronRolloutPlan({ baseUrl, companyId, auth
 export async function fetchAllOpenCodeQuotaAgentsPlan({ baseUrl, companyId, authHeaders }) {
   const model = resolveOpencodeQuotaFallbackModel();
 
-  const listUrl = `${baseUrl}/api/companies/${companyId}/agents`;
-  const listRes = await fetch(listUrl, { headers: authHeaders });
-  if (!listRes.ok) {
-    const text = await listRes.text();
-    throw new Error(`GET ${listUrl} -> ${listRes.status} ${text.slice(0, 500)}`);
-  }
-
-  const agents = await listRes.json();
-  if (!Array.isArray(agents)) {
-    throw new Error("Unexpected response: expected agents array");
-  }
+  const agents = await fetchAgentsForCompany(baseUrl, companyId, authHeaders);
 
   const targets = agents.filter(
     (a) =>
@@ -79,6 +78,8 @@ export async function applyOpencodeQuotaModelPatches({ baseUrl, authHeaders, tar
 
     const nextConfig = buildNemotronOpenCodeAdapterConfig(agent, model);
     const patchUrl = `${baseUrl}/api/agents/${agent.id}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), PATCH_TIMEOUT_MS);
     try {
       const patchRes = await fetch(patchUrl, {
         method: "PATCH",
@@ -87,6 +88,7 @@ export async function applyOpencodeQuotaModelPatches({ baseUrl, authHeaders, tar
           adapterType: "opencode_local",
           adapterConfig: nextConfig,
         }),
+        signal: controller.signal,
       });
 
       if (!patchRes.ok) {
@@ -105,6 +107,8 @@ export async function applyOpencodeQuotaModelPatches({ baseUrl, authHeaders, tar
         name: typeof agent.name === "string" ? agent.name : agent.id,
         message: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
   return { patched, failures };
