@@ -14,7 +14,7 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
-import { parseCodexJsonl } from "./parse.js";
+import { codexStdoutIndicatesIgnorableNonZeroExit, parseCodexJsonl } from "./parse.js";
 import { codexHomeDir, readCodexAuthInfo } from "./quota.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -190,7 +190,7 @@ export async function testEnvironment(
           message: "Codex hello probe timed out.",
           hint: "Retry the probe. If this persists, verify Codex can run `Respond with hello` from this directory manually.",
         });
-      } else if ((probe.exitCode ?? 1) === 0) {
+      } else if ((probe.exitCode ?? 1) === 0 || codexStdoutIndicatesIgnorableNonZeroExit(parsed, probe.stderr)) {
         const summary = parsed.summary.trim();
         const hasHello = /\bhello\b/i.test(summary);
         checks.push({

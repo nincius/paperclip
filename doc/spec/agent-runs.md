@@ -112,6 +112,8 @@ Control flow (happy path):
 6. Process exits, output parser updates run result + runtime state.
 7. Agent returns to `idle` or `error`; UI updates in real time.
 
+**Heartbeat executor:** The server records the adapter’s terminal status (`succeeded` / `failed` / `cancelled` / `timed_out`) once the outcome is known. If later bookkeeping (wakeup row, issue execution unlock, ledger, task session, or agent idle transition) throws, the run row keeps that terminal status instead of being overwritten as `failed`. Whitespace-only adapter `errorMessage` values are ignored when `exitCode` is `0`, so empty noise does not force a failure.
+
 ## 6. Agent Run Protocol (Version `agent-run/v1`)
 
 This protocol is runtime-agnostic and implemented by all adapters.
@@ -314,6 +316,8 @@ Codex emits JSONL events. Parse line-by-line and extract:
    - `output_tokens`
 
 Codex JSONL currently may not include cost; store token usage and leave cost null/unknown unless available.
+
+**Process exit code:** The `codex` process may return a non-zero exit code even when the last stream event is `turn.completed` and JSONL carries no `error` / `turn.failed` message (and stderr is empty after adapter filtering). In that case Paperclip still treats the adapter outcome as success, records the real `exit_code` on the run row, and may add `resultJson.paperclip.ignoredNonZeroExitCode` for operators. If stderr has a non-empty first line or JSONL reports an error, non-zero exit remains a failure.
 
 ## 7.3 Common local adapter process handling
 

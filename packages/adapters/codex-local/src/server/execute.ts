@@ -22,7 +22,7 @@ import {
   runChildProcess,
   resolveHeartbeatChildTimeoutSec,
 } from "@paperclipai/adapter-utils/server-utils";
-import { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
+import { codexStdoutIndicatesIgnorableNonZeroExit, parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
 import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 
@@ -586,19 +586,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       parsedError ||
       stderrLine ||
       `Codex exited with code ${attempt.proc.exitCode ?? -1}`;
-    const errorCode = resolveCodexErrorCode({
-      timedOut: false,
-      exitCode: attempt.proc.exitCode,
-      parsedError,
-      stderrLine,
-    });
+    // Codex sometimes exits non-zero even after a successful `turn.completed` (e.g. nested tool/command
+    // failure semantics). When JSONL shows a completed turn and no parsed error, treat as adapter success
+    // but keep the real process exitCode on the result for diagnostics.
+    const processExitNonZero = (attempt.proc.exitCode ?? 0) !== 0;
+    const ignoreNonZeroExitForOutcome =
+      processExitNonZero && codexStdoutIndicatesIgnorableNonZeroExit(attempt.parsed, attempt.proc.stderr);
+    const errorCode = ignoreNonZeroExitForOutcome
+      ? null
+      : resolveCodexErrorCode({
+          timedOut: false,
+          exitCode: attempt.proc.exitCode,
+          parsedError,
+          stderrLine,
+        });
 
     return {
       exitCode: attempt.proc.exitCode,
       signal: attempt.proc.signal,
       timedOut: false,
       errorMessage:
-        (attempt.proc.exitCode ?? 0) === 0
+        (attempt.proc.exitCode ?? 0) === 0 || ignoreNonZeroExitForOutcome
           ? null
           : fallbackErrorMessage,
       errorCode,
@@ -614,6 +622,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resultJson: {
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
+        ...(ignoreNonZeroExitForOutcome
+          ? {
+              paperclip: {
+                ignoredNonZeroExitCode: attempt.proc.exitCode,
+                reason: "codex_last_event_turn_completed",
+              },
+            }
+          : {}),
       },
       summary: attempt.parsed.summary,
       clearSession: Boolean(clearSessionOnMissingSession && !resolvedSessionId),

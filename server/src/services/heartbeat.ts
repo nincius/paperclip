@@ -2867,13 +2867,20 @@ export function heartbeatService(db: Db) {
       });
       const normalizedUsage = sessionUsageResolution.normalizedUsage;
 
+      const trimmedAdapterError =
+        typeof adapterResult.errorMessage === "string"
+          ? adapterResult.errorMessage.trim()
+          : adapterResult.errorMessage != null
+            ? String(adapterResult.errorMessage).trim()
+            : "";
+
       let outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
       const latestRun = await getRun(run.id);
       if (latestRun?.status === "cancelled") {
         outcome = "cancelled";
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
-      } else if ((adapterResult.exitCode ?? 0) === 0 && !adapterResult.errorMessage) {
+      } else if ((adapterResult.exitCode ?? 0) === 0 && !trimmedAdapterError) {
         outcome = "succeeded";
       } else {
         outcome = "failed";
@@ -2919,13 +2926,17 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
+      const failureMessageForRun =
+        trimmedAdapterError ||
+        (outcome === "timed_out" ? "Timed out" : outcome === "failed" ? "Adapter failed" : null);
+
       await setRunStatus(run.id, status, {
         finishedAt: new Date(),
         error:
           outcome === "succeeded"
             ? null
             : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
+                failureMessageForRun ?? "Adapter failed",
                 currentUserRedactionOptions,
               ),
         errorCode:
@@ -2950,7 +2961,7 @@ export function heartbeatService(db: Db) {
 
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
         finishedAt: new Date(),
-        error: adapterResult.errorMessage ?? null,
+        error: trimmedAdapterError || null,
       });
 
       const finalizedRun = await getRun(run.id);
@@ -2987,13 +2998,63 @@ export function heartbeatService(db: Db) {
               sessionParamsJson: nextSessionState.params,
               sessionDisplayId: nextSessionState.displayId,
               lastRunId: finalizedRun.id,
-              lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+              lastError: outcome === "succeeded" ? null : (trimmedAdapterError || "run_failed"),
             });
           }
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
     } catch (err) {
+      const latestAfterError = await getRun(run.id).catch(() => null);
+      const preservedTerminal =
+        latestAfterError &&
+        (latestAfterError.status === "succeeded" ||
+          latestAfterError.status === "cancelled" ||
+          latestAfterError.status === "timed_out");
+
+      if (preservedTerminal) {
+        logger.error(
+          { err, runId, preservedStatus: latestAfterError.status },
+          "heartbeat bookkeeping failed after run reached terminal adapter outcome; preserving status",
+        );
+        if (handle) {
+          try {
+            await runLogStore.finalize(handle);
+          } catch (finalizeErr) {
+            logger.warn({ err: finalizeErr, runId }, "failed to finalize run log after bookkeeping error");
+          }
+        }
+        try {
+          await setWakeupStatus(
+            run.wakeupRequestId,
+            latestAfterError.status === "succeeded" ? "completed" : latestAfterError.status,
+            {
+              finishedAt: new Date(),
+              error: latestAfterError.error ?? null,
+            },
+          );
+        } catch (wakeupErr) {
+          logger.warn({ err: wakeupErr, runId }, "failed to repair wakeup status after bookkeeping error");
+        }
+        try {
+          await releaseIssueExecutionAndPromote(latestAfterError);
+        } catch (releaseErr) {
+          logger.error({ err: releaseErr, runId }, "failed to release issue execution after preserved terminal run");
+        }
+        const preservedOutcome: "succeeded" | "cancelled" | "timed_out" =
+          latestAfterError.status === "succeeded"
+            ? "succeeded"
+            : latestAfterError.status === "cancelled"
+              ? "cancelled"
+              : "timed_out";
+        try {
+          await finalizeAgentStatus(agent.id, preservedOutcome);
+        } catch (finalizeErr) {
+          logger.error({ err: finalizeErr, runId }, "finalizeAgentStatus failed after preserved terminal run");
+        }
+        return;
+      }
+
       const message = redactCurrentUserText(
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),

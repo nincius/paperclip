@@ -106,6 +106,36 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3100/api/health
 
 With static UI (`PAPERCLIP_UI_DEV_MIDDLEWARE=false`), you should **not** see a separate listener for Vite HMR (e.g. port **13100** when the API is on 3100). If you still see it, confirm the plist sets `PAPERCLIP_UI_DEV_MIDDLEWARE=false` and reload the agent.
 
+## Node memory: Paperclip vs test runners
+
+A successful **`curl http://127.0.0.1:3100/api/health`** (e.g. HTTP **200**) only means the **Paperclip API** managed by your LaunchAgent (or a single dev server) is responding. It does **not** mean the machine has little RAM in use or that every **`node`** process in Activity Monitor belongs to Paperclip.
+
+**Vitest** (and similar runners) spawn **multiple parallel Node workers** (`node (vitest 1)`, `node (vitest 2)`, …). Each worker can use **gigabytes** on a large monorepo. That memory is **independent** of the LaunchAgent process. Leftover workers also appear after **interrupted** test runs, **watch** mode left without a clean exit, or **several** terminals running tests at once—so total usage can climb into **tens of GB** while Paperclip still reports healthy.
+
+**Diagnose**
+
+```sh
+pgrep -fl vitest
+ps aux | grep -E '/paperclip(-[^/]+)?/' | grep node | grep -v grep
+```
+
+[`scripts/kill-dev.sh`](https://github.com/paperclip-ai/paperclip/blob/master/scripts/kill-dev.sh) targets Paperclip **dev** paths and skips `PAPERCLIP_MANAGED_BY_LAUNCHD`; it does **not** stop Vitest workers (different command lines).
+
+**Clean up stray test workers** (stops Vitest processes on this user session—avoid if you rely on another Vitest run elsewhere):
+
+```sh
+pkill -f vitest
+```
+
+Or list PIDs with `pgrep -fl vitest` and **`kill`** specific ones.
+
+**Reduce recurrence**
+
+- Prefer **`vitest run`** for one-shot local runs; avoid leaving **`vitest --watch`** running unattended.
+- Cap parallelism when needed, e.g. **`vitest run --maxWorkers=2`** (or set **`maxWorkers`** / **`poolOptions`** in Vitest config for this repo).
+
+**LaunchAgent-specific:** keep **`PAPERCLIP_UI_DEV_MIDDLEWARE=false`** and a built UI so the **background** Paperclip process does not embed Vite (see env table above). That does **not** limit Vitest—you must manage test processes separately.
+
 ## PATH and local adapters
 
 LaunchAgents use the `PATH` from the plist only (not your interactive shell). If local adapters (Codex, OpenCode, tools installed via nvm/fnm, etc.) work in Terminal but not under launchd, merge in the PATH from a shell where they work:

@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- When JSONL ends with `turn.completed`, there is no parsed error, and stderr is empty, treat a **non-zero process exit** as adapter success (keep real `exitCode`; set `resultJson.paperclip.ignoredNonZeroExitCode` for operators). Aligns environment hello-probe with the same rule via `codexStdoutIndicatesIgnorableNonZeroExit`.
 - Treat heartbeat workspace `source` **`adapter_config`** like **`agent_home`** when applying optional adapter `cwd` override.
 - When `timeoutSec` is 0 or omitted, use the shared **3600s** default child-process cap (`@paperclipai/adapter-utils`).
 - Emit stable `errorCode` values on failure (`timeout`, `codex_auth_required`, `codex_exit_nonzero`) for heartbeat aggregation and operator triage.

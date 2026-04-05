@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { isCodexUnknownSessionError, parseCodexJsonl } from "@paperclipai/adapter-codex-local/server";
+import {
+  codexStdoutIndicatesIgnorableNonZeroExit,
+  isCodexUnknownSessionError,
+  parseCodexJsonl,
+} from "@paperclipai/adapter-codex-local/server";
 import { parseCodexStdoutLine } from "@paperclipai/adapter-codex-local/ui";
 import { printCodexStreamEvent } from "@paperclipai/adapter-codex-local/cli";
 
@@ -22,6 +26,32 @@ describe("codex_local parser", () => {
     });
     expect(parsed.costUsd).toBeCloseTo(0.0042, 6);
     expect(parsed.errorMessage).toBe("model access denied");
+    expect(parsed.lastTurnTerminal).toBe("failed");
+  });
+
+  it("records last turn.completed when it is the final turn event", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-abc" }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+      }),
+    ].join("\n");
+
+    const parsed = parseCodexJsonl(stdout);
+    expect(parsed.lastTurnTerminal).toBe("completed");
+    expect(parsed.errorMessage).toBeNull();
+  });
+
+  it("codexStdoutIndicatesIgnorableNonZeroExit is false when stderr has content", () => {
+    const parsed = parseCodexJsonl(
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 0 },
+      }),
+    );
+    expect(codexStdoutIndicatesIgnorableNonZeroExit(parsed, "something went wrong")).toBe(false);
   });
 });
 

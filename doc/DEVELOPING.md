@@ -77,6 +77,8 @@ You can wire the same CLI entry (`paperclipai run` / `cli` + `tsx` + `run`) to *
 
 **`scripts/kill-dev.sh`** skips processes that set **`PAPERCLIP_MANAGED_BY_LAUNCHD=1`** (the template LaunchAgent plist sets this) so clearing terminal dev servers does not SIGTERM the background service. Stop the agent with `launchctl bootout` when you intend to shut it down.
 
+If Activity Monitor shows huge **`node (vitest …)`** usage while **`/api/health`** still returns **200**, that is expected: Vitest workers are separate from the LaunchAgent server. See **Node memory: Paperclip vs test runners** in **`docs/guides/board-operator/macos-background-service.md`**.
+
 ## Docker Quickstart (No local Node install)
 
 Build and run Paperclip in Docker:
