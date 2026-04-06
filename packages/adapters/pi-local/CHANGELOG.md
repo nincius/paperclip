@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Remove duplicated `renderedHeartbeatPrompt` declaration in `execute` resume/wake prompt assembly, fixing LaunchAgent/runtime transpile failures.
 - Treat heartbeat workspace `source` **`adapter_config`** like **`agent_home`** when applying optional adapter `cwd` override.
 - When `timeoutSec` is 0 or omitted, use the shared **3600s** default child-process cap (`@paperclipai/adapter-utils`).
 - Emit stable `errorCode` values on failure (`timeout`, `pi_auth_required`, `pi_exit_nonzero`) for heartbeat aggregation and operator triage.

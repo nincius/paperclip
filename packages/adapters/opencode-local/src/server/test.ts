@@ -169,76 +169,46 @@ export async function testEnvironment(
         detail: command,
       });
     }
-  }
+    const canRunProbe = checks.every(
+      (check) => check.code !== "opencode_cwd_invalid" && check.code !== "opencode_command_unresolvable",
+    );
+    let modelValidationPassed = false;
+    const configuredModel = asString(config.model, "").trim();
 
-  const canRunProbe =
-    checks.every((check) => check.code !== "opencode_cwd_invalid" && check.code !== "opencode_command_unresolvable");
-
-  let modelValidationPassed = false;
-  const configuredModel = asString(config.model, "").trim();
-
-  if (canRunProbe) {
-    await runOpenCodeModelDiscovery({
-      command,
-      cwd,
-      env: runtimeEnv,
-      configuredModel: Boolean(configuredModel),
-      checks,
-    });
-  }
-
-  // Only validate a configured provider/model ID when one is set; discovery above may still warn without it.
-  if (configuredModel && canRunProbe) {
-    try {
-      await ensureOpenCodeModelConfiguredAndAvailable({
-        model: configuredModel,
+    if (canRunProbe) {
+      await runOpenCodeModelDiscovery({
         command,
         cwd,
         env: runtimeEnv,
-      });
-      checks.push({
-        code: "opencode_model_configured",
-        level: "info",
-        message: `Configured model: ${configuredModel}`,
-      });
-      modelValidationPassed = true;
-    } catch (err) {
-      checks.push({
-        code: "opencode_model_invalid",
-        level: "error",
-        message: err instanceof Error ? err.message : "Configured model is unavailable.",
-        hint: "Run `opencode models` and choose a currently available provider/model ID.",
+        configuredModel: Boolean(configuredModel),
+        checks,
       });
     }
-  }
 
-  if (canRunProbe && modelValidationPassed) {
-    const extraArgs = (() => {
-      const fromExtraArgs = asStringArray(config.extraArgs);
-      if (fromExtraArgs.length > 0) return fromExtraArgs;
-      return asStringArray(config.args);
-    })();
-    const variant = asString(config.variant, "").trim();
-
-    const args = ["run", "--format", "json"];
-    args.push("--model", configuredModel);
-    if (variant) args.push("--variant", variant);
-    if (extraArgs.length > 0) args.push(...extraArgs);
-
-    try {
-      const probe = await runChildProcess(
-        `opencode-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        command,
-        args,
-        {
+    // Only validate a configured provider/model ID when one is set; discovery above may still warn without it.
+    if (configuredModel && canRunProbe) {
+      try {
+        await ensureOpenCodeModelConfiguredAndAvailable({
+          model: configuredModel,
+          command,
           cwd,
           env: runtimeEnv,
-          timeoutSec: 120,
-          graceSec: 5,
-          stdin: "Respond with hello.",
-          onLog: async () => {},
-        },
-      );
+        });
+        checks.push({
+          code: "opencode_model_configured",
+          level: "info",
+          message: `Configured model: ${configuredModel}`,
+        });
+        modelValidationPassed = true;
+      } catch (err) {
+        checks.push({
+          code: "opencode_model_invalid",
+          level: "error",
+          message: err instanceof Error ? err.message : "Configured model is unavailable.",
+          hint: "Run `opencode models` and choose a currently available provider/model ID.",
+        });
+      }
+    }
 
     if (canRunProbe && modelValidationPassed) {
       const extraArgs = (() => {
@@ -247,10 +217,9 @@ export async function testEnvironment(
         return asStringArray(config.args);
       })();
       const variant = asString(config.variant, "").trim();
-      const probeModel = configuredModel;
 
       const args = ["run", "--format", "json"];
-      args.push("--model", probeModel);
+      args.push("--model", configuredModel);
       if (variant) args.push("--variant", variant);
       if (extraArgs.length > 0) args.push(...extraArgs);
 
@@ -262,7 +231,7 @@ export async function testEnvironment(
           {
             cwd,
             env: runtimeEnv,
-            timeoutSec: 60,
+            timeoutSec: 120,
             graceSec: 5,
             stdin: "Respond with hello.",
             onLog: async () => {},

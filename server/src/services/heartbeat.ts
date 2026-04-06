@@ -578,6 +578,74 @@ function deriveTaskKey(
   );
 }
 
+export function deriveTaskKeyWithHeartbeatFallback(
+  contextSnapshot: Record<string, unknown> | null | undefined,
+  payload: Record<string, unknown> | null | undefined,
+) {
+  return deriveTaskKey(contextSnapshot, payload) ?? HEARTBEAT_TASK_KEY;
+}
+
+export function applyPersistedExecutionWorkspaceConfig(input: {
+  config: Record<string, unknown>;
+  workspaceConfig: ExecutionWorkspaceConfig | null;
+  mode: ReturnType<typeof resolveExecutionWorkspaceMode>;
+}): Record<string, unknown> {
+  const nextConfig: Record<string, unknown> = { ...input.config };
+  if (nextConfig.workspaceRuntime) {
+    return nextConfig;
+  }
+  if (input.mode === "agent_default") {
+    return nextConfig;
+  }
+  const persistedRuntime = parseObject(input.workspaceConfig?.workspaceRuntime);
+  if (Object.keys(persistedRuntime).length > 0) {
+    nextConfig.workspaceRuntime = persistedRuntime;
+  }
+  return nextConfig;
+}
+
+export function buildExecutionWorkspaceConfigSnapshot(
+  config: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const snapshot = parseObject(config);
+  return Object.keys(snapshot).length > 0 ? snapshot : null;
+}
+
+export function stripWorkspaceRuntimeFromExecutionRunConfig(
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...config };
+  delete next.workspaceRuntime;
+  return next;
+}
+
+export function buildRealizedExecutionWorkspaceFromPersisted(input: {
+  base: ExecutionWorkspaceInput;
+  workspace: ExecutionWorkspace;
+}): RealizedExecutionWorkspace | null {
+  const workspacePath =
+    readNonEmptyString(input.workspace.providerRef) ??
+    readNonEmptyString(input.workspace.cwd) ??
+    null;
+  if (!workspacePath) return null;
+  return {
+    ...input.base,
+    strategy: input.workspace.strategyType === "git_worktree" ? "git_worktree" : "project_primary",
+    source: "task_session",
+    cwd: workspacePath,
+    branchName: readNonEmptyString(input.workspace.branchName),
+    worktreePath: workspacePath,
+    warnings: [],
+    created: false,
+  };
+}
+
+function buildHeartbeatRunIssueComment(resultJson: Record<string, unknown> | null): string | null {
+  const summary = readNonEmptyString(resultJson?.summary);
+  const message = readNonEmptyString(resultJson?.message);
+  return summary ?? message ?? null;
+}
+
 /**
  * Legacy session id from `agent_runtime_state` used only when no task-scoped session was resolved.
  * For `codex_local`, omitting this on unscoped runs avoids resuming huge Codex threads during idle heartbeats.
@@ -2504,39 +2572,6 @@ export function heartbeatService(db: Db) {
       previousSessionParams,
       { useProjectWorkspace: requestedExecutionWorkspaceMode !== "agent_default" },
     );
-    const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
-      agentConfig: config,
-      projectPolicy: projectExecutionWorkspacePolicy,
-      issueSettings: issueExecutionWorkspaceSettings,
-      mode: executionWorkspaceMode,
-      legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
-    });
-    const mergedConfig = issueAssigneeOverrides?.adapterConfig
-      ? { ...workspaceManagedConfig, ...issueAssigneeOverrides.adapterConfig }
-      : workspaceManagedConfig;
-    const { config: resolvedConfig, secretKeys } = await secretsSvc.resolveAdapterConfigForRuntime(
-      agent.companyId,
-      mergedConfig,
-    );
-    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
-    const runtimeConfig = {
-      ...resolvedConfig,
-      paperclipRuntimeSkills: runtimeSkillEntries,
-    };
-    await assertIssueExecutionSetup({
-      agent,
-      run,
-      issue: issueContext
-        ? {
-            id: issueContext.id,
-            identifier: issueContext.identifier,
-            status: issueContext.status,
-            assigneeAgentId: issueContext.assigneeAgentId,
-          }
-        : null,
-      resolvedWorkspace,
-      runtimeConfig,
-    });
     const issueRef = issueContext
       ? {
           id: issueContext.id,
@@ -2612,6 +2647,20 @@ export function heartbeatService(db: Db) {
       ...resolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
     };
+    await assertIssueExecutionSetup({
+      agent,
+      run,
+      issue: issueContext
+        ? {
+            id: issueContext.id,
+            identifier: issueContext.identifier,
+            status: issueContext.status,
+            assigneeAgentId: issueContext.assigneeAgentId,
+          }
+        : null,
+      resolvedWorkspace,
+      runtimeConfig,
+    });
     const workspaceOperationRecorder = workspaceOperationsSvc.createRecorder({
       companyId: agent.companyId,
       heartbeatRunId: run.id,

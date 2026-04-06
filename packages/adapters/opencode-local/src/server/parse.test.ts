@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseOpenCodeJsonl,
+  opencodeStdoutIndicatesIgnorableNonZeroExit,
   isOpenCodePermissionAutoRejectError,
   isOpenCodeStaleWorkspaceFileError,
   isOpenCodeUnknownSessionError,
@@ -45,6 +46,31 @@ describe("parseOpenCodeJsonl", () => {
     });
     expect(parsed.costUsd).toBeCloseTo(0.0025, 6);
     expect(parsed.errorMessage).toContain("model unavailable");
+    expect(parsed.lastStepFinishReason).toBe("done");
+  });
+
+  it("tracks terminal step_finish reason and detects ignorable non-zero exit conditions", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "text",
+        sessionID: "session_456",
+        part: { text: "Applied patch and left comments." },
+      }),
+      JSON.stringify({
+        type: "step_finish",
+        sessionID: "session_456",
+        part: {
+          reason: "stop",
+          cost: 0.001,
+          tokens: { input: 10, output: 4, reasoning: 1, cache: { read: 0, write: 0 } },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseOpenCodeJsonl(stdout);
+    expect(parsed.lastStepFinishReason).toBe("stop");
+    expect(opencodeStdoutIndicatesIgnorableNonZeroExit(parsed, "")).toBe(true);
+    expect(opencodeStdoutIndicatesIgnorableNonZeroExit(parsed, "warning on stderr")).toBe(false);
   });
 
   it("detects unknown session errors", () => {

@@ -8,6 +8,7 @@
 
 ### Patch Changes
 
+- Restored shared export `INBOX_MINE_ISSUE_STATUS_FILTER` (derived from `ISSUE_STATUSES` minus `cancelled`) and re-exported it through package `index`, fixing LaunchAgent/runtime startup failures when `validators/agent` imports this constant.
 - `ISSUE_BACKLOG_STATUSES`: readonly `["backlog"]` tuple for backlog-only filters (UI aligns with `ISSUE_ACTIVE_STATUSES` / `ISSUE_TERMINAL_STATUSES`).
 - **`DEFAULT_OPENCODE_QUOTA_FALLBACK_MODEL`:** canonical OpenCode quota-fallback model id, exported from package **`constants`** so UI and rollout tooling share one value.
 - **Non-breaking:** export **`IssueOpenStatus`** (`Exclude<IssueStatus, IssueTerminalStatus>`), typed **`ISSUE_OPEN_STATUSES`**, and **`OPEN_ISSUE_STATUSES`** (runtime-frozen copy of the same members for DB partial-index clauses; not the same array reference as `ISSUE_OPEN_STATUSES`).

@@ -16,6 +16,7 @@ import {
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
+  buildInvocationEnvForLogs,
   readPaperclipRuntimeSkillEntries,
   resolveCommandForLogs,
   resolvePaperclipDesiredSkillNames,
@@ -329,7 +330,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     renderTemplate(systemPromptExtension, templateData),
     agentHome || null,
   );
-  const renderedHeartbeatPrompt = renderTemplate(promptTemplate, templateData);
   const renderedBootstrapPrompt =
     !canResumeSession && bootstrapPromptTemplate.trim().length > 0
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()

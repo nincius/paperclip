@@ -16,6 +16,7 @@ import {
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
+  buildInvocationEnvForLogs,
   resolveCommandForLogs,
   renderTemplate,
   renderPaperclipWakePrompt,
@@ -26,6 +27,7 @@ import {
   resolveHeartbeatChildTimeoutSec,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
+  opencodeStdoutIndicatesIgnorableNonZeroExit,
   isOpenCodePermissionAutoRejectError,
   isOpenCodeStaleWorkspaceFileError,
   isOpenCodeUnknownSessionError,
@@ -76,6 +78,11 @@ function resolveOpenCodeErrorCode(input: {
 function isOpenCodeModelsTimeoutError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /`opencode models` timed out after \d+s\./i.test(message);
+}
+
+function isOpenCodeConfiguredModelUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Configured OpenCode model is unavailable:/i.test(message);
 }
 
 /**
@@ -257,6 +264,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
   const timeoutSec = resolveHeartbeatChildTimeoutSec(config.timeoutSec);
   const graceSec = asNumber(config.graceSec, 20);
   const extraArgs = (() => {
@@ -277,41 +285,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stdout",
       `[paperclip] OpenCode session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${cwd}".\n`,
     );
-    await ensureCommandResolvable(command, cwd, runtimeEnv);
-    const resolvedCommand = await resolveCommandForLogs(command, cwd, runtimeEnv);
-    const loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
-      runtimeEnv,
-      includeRuntimeKeys: ["HOME"],
-      resolvedCommand,
-    });
-
-  const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-  const resolvedInstructionsFilePath = instructionsFilePath
-    ? path.resolve(cwd, instructionsFilePath)
-    : "";
+  }
 
   env.OPENCODE_PERMISSION = await mergeOpenCodePermissionNonInteractive(env.OPENCODE_PERMISSION, onLog);
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
   await ensureCommandResolvable(command, cwd, runtimeEnv);
+  const resolvedCommand = await resolveCommandForLogs(command, cwd, runtimeEnv);
+  const loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+    runtimeEnv,
+    includeRuntimeKeys: ["HOME"],
+    resolvedCommand,
+  });
 
-  try {
-    await ensureOpenCodeModelConfiguredAndAvailable({
-      model,
-      command,
-      cwd,
-      env: runtimeEnv,
-    });
-  } catch (err) {
-    if (!isOpenCodeModelsTimeoutError(err)) throw err;
-    await onLog(
-      "stderr",
-      `[paperclip] Warning: ${err instanceof Error ? err.message : String(err)} Continuing with configured model ${model}.\n`,
-    );
-  }
+  const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const resolvedInstructionsFilePath = instructionsFilePath ? path.resolve(cwd, instructionsFilePath) : "";
   const instructionsDir = resolvedInstructionsFilePath ? `${path.dirname(resolvedInstructionsFilePath)}/` : "";
   let instructionsPrefix = "";
   if (resolvedInstructionsFilePath) {
@@ -331,16 +322,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const commandNotes = (() => {
-    if (!resolvedInstructionsFilePath) return [] as string[];
+    const notes = [...preparedRuntimeConfig.notes];
+    if (!resolvedInstructionsFilePath) return notes;
     if (instructionsPrefix.length > 0) {
-      return [
-        `Loaded agent instructions from ${resolvedInstructionsFilePath}`,
+      notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
+      notes.push(
         `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
-      ];
+      );
+      return notes;
     }
-    return [
+    notes.push(
       `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
-    ];
+    );
+    return notes;
   })();
 
   const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
@@ -360,12 +354,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : "";
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
   const prompt = expandShellStyleAgentHome(
-    joinPromptSections([
-      instructionsPrefix,
-      renderedBootstrapPrompt,
-      sessionHandoffNote,
-      renderedPrompt,
-    ]),
+    joinPromptSections([instructionsPrefix, renderedBootstrapPrompt, sessionHandoffNote, renderedPrompt]),
     agentHome || null,
   );
   const promptMetrics = {
@@ -376,115 +365,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     heartbeatPromptChars: renderedPrompt.length,
   };
 
-  const buildArgs = (resumeSessionId: string | null) => {
-    const args = ["run", "--format", "json"];
-    if (resumeSessionId) args.push("--session", resumeSessionId);
-    if (model) args.push("--model", model);
-    if (variant) args.push("--variant", variant);
-    if (extraArgs.length > 0) args.push(...extraArgs);
-    return args;
-  };
-
-  const runAttempt = async (resumeSessionId: string | null) => {
-    const args = buildArgs(resumeSessionId);
-    if (onMeta) {
-      await onMeta({
-        adapterType: "opencode_local",
+  try {
+    try {
+      await ensureOpenCodeModelConfiguredAndAvailable({
+        model,
         command,
         cwd,
-        commandNotes,
-        commandArgs: [...args, `<stdin prompt ${prompt.length} chars>`],
-        env: redactEnvForLogs(env),
-        prompt,
-        promptMetrics,
-        context,
+        env: runtimeEnv,
       });
-    }
-
-    const proc = await runChildProcess(runId, command, args, {
-      cwd,
-      env: runtimeEnv,
-    });
-
-  const toResult = (
-    attempt: {
-      proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string };
-      rawStderr: string;
-      parsed: ReturnType<typeof parseOpenCodeJsonl>;
-    },
-    clearSessionOnMissingSession = false,
-  ): AdapterExecutionResult => {
-    if (attempt.proc.timedOut) {
-      return {
-        exitCode: attempt.proc.exitCode,
-        signal: attempt.proc.signal,
-        timedOut: true,
-        errorMessage: `Timed out after ${timeoutSec}s`,
-        errorCode: "timeout",
-        clearSession: clearSessionOnMissingSession,
-      };
-    }
-
-    const commandNotes = (() => {
-      const notes = [...preparedRuntimeConfig.notes];
-      if (!resolvedInstructionsFilePath) return notes;
-      if (instructionsPrefix.length > 0) {
-        notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
-        notes.push(
-          `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
-        );
-        return notes;
-      }
-      notes.push(
-        `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
+    } catch (err) {
+      if (isOpenCodeConfiguredModelUnavailableError(err)) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      const kind = isOpenCodeModelsTimeoutError(err) ? "timeout" : "discovery_error";
+      await onLog(
+        "stderr",
+        `[paperclip] Warning (${kind}): ${reason} Continuing with configured model ${model}.\n`,
       );
-      return notes;
-    })();
-
-    const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
-    const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
-    const rawExitCode = attempt.proc.exitCode;
-    const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
-    const fallbackErrorMessage =
-      parsedError ||
-      stderrLine ||
-      `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
-    const modelId = model || null;
-    const errorCode = resolveOpenCodeErrorCode({
-      timedOut: false,
-      exitCode: synthesizedExitCode,
-      parsedError,
-      stderrLine,
-      stdout: attempt.proc.stdout,
-      stderr: attempt.proc.stderr,
-    });
-
-    return {
-      exitCode: synthesizedExitCode,
-      signal: attempt.proc.signal,
-      timedOut: false,
-      errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
-      errorCode,
-      usage: {
-        inputTokens: attempt.parsed.usage.inputTokens,
-        outputTokens: attempt.parsed.usage.outputTokens,
-        cachedInputTokens: attempt.parsed.usage.cachedInputTokens,
-      },
-      sessionId: resolvedSessionId,
-      sessionParams: resolvedSessionParams,
-      sessionDisplayId: resolvedSessionId,
-      provider: parseModelProvider(modelId),
-      biller: resolveOpenCodeBiller(runtimeEnv, parseModelProvider(modelId)),
-      model: modelId,
-      billingType: "unknown",
-      costUsd: attempt.parsed.costUsd,
-      resultJson: {
-        stdout: attempt.proc.stdout,
-        stderr: attempt.proc.stderr,
-      },
-      summary: attempt.parsed.summary,
-      clearSession: Boolean(clearSessionOnMissingSession && !attempt.parsed.sessionId),
-    };
+    }
 
     const buildArgs = (resumeSessionId: string | null) => {
       const args = ["run", "--format", "json"];
@@ -541,6 +438,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           signal: attempt.proc.signal,
           timedOut: true,
           errorMessage: `Timed out after ${timeoutSec}s`,
+          errorCode: "timeout",
           clearSession: clearSessionOnMissingSession,
         };
       }
@@ -567,12 +465,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stderrLine ||
         `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
       const modelId = model || null;
+      const processExitNonZero = (synthesizedExitCode ?? 0) !== 0;
+      const ignoreNonZeroExitForOutcome =
+        processExitNonZero &&
+        opencodeStdoutIndicatesIgnorableNonZeroExit(attempt.parsed, attempt.proc.stderr);
+      const errorCode = resolveOpenCodeErrorCode({
+        timedOut: false,
+        exitCode: ignoreNonZeroExitForOutcome ? 0 : synthesizedExitCode,
+        parsedError,
+        stderrLine,
+        stdout: attempt.proc.stdout,
+        stderr: attempt.proc.stderr,
+      });
 
       return {
         exitCode: synthesizedExitCode,
         signal: attempt.proc.signal,
         timedOut: false,
-        errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
+        errorMessage: (synthesizedExitCode ?? 0) === 0 || ignoreNonZeroExitForOutcome ? null : fallbackErrorMessage,
+        errorCode,
         usage: {
           inputTokens: attempt.parsed.usage.inputTokens,
           outputTokens: attempt.parsed.usage.outputTokens,
@@ -589,6 +500,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resultJson: {
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
+          ...(ignoreNonZeroExitForOutcome
+            ? {
+                paperclip: {
+                  ignoredNonZeroExitCode: synthesizedExitCode,
+                  reason: "opencode_last_step_finish_stop",
+                },
+              }
+            : {}),
         },
         summary: attempt.parsed.summary,
         clearSession: Boolean(clearSessionOnMissingSession && !attempt.parsed.sessionId),
@@ -598,11 +517,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const initial = await runAttempt(sessionId);
     const initialFailed =
       !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || Boolean(initial.parsed.errorMessage));
-    if (
-      sessionId &&
-      initialFailed &&
-      isOpenCodeUnknownSessionError(initial.proc.stdout, initial.rawStderr)
-    ) {
+
+    if (sessionId && initialFailed && isOpenCodeUnknownSessionError(initial.proc.stdout, initial.rawStderr)) {
       await onLog(
         "stdout",
         `[paperclip] OpenCode session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
@@ -611,45 +527,43 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return toResult(retry, true);
     }
 
+    if (
+      sessionId &&
+      initialFailed &&
+      isOpenCodePermissionAutoRejectError(
+        initial.proc.stdout,
+        initial.rawStderr,
+        initial.parsed.errorMessage,
+      )
+    ) {
+      await onLog(
+        "stdout",
+        `[paperclip] OpenCode auto-rejected a permission prompt (non-interactive run); retrying once without session resume.\n`,
+      );
+      const retry = await runAttempt(null);
+      return toResult(retry, true);
+    }
+
+    if (
+      initialFailed &&
+      isOpenCodeStaleWorkspaceFileError(
+        initial.proc.stdout,
+        initial.rawStderr,
+        initial.parsed.errorMessage,
+      )
+    ) {
+      await onLog(
+        "stdout",
+        sessionId
+          ? `[paperclip] OpenCode reported a workspace file changed after it was read (likely concurrent edit); retrying once without session resume.\n`
+          : `[paperclip] OpenCode reported a workspace file changed after it was read; retrying the run once.\n`,
+      );
+      const retry = await runAttempt(null);
+      return toResult(retry, Boolean(sessionId));
+    }
+
     return toResult(initial);
   } finally {
     await preparedRuntimeConfig.cleanup();
   }
-
-  if (
-    sessionId &&
-    initialFailed &&
-    isOpenCodePermissionAutoRejectError(
-      initial.proc.stdout,
-      initial.rawStderr,
-      initial.parsed.errorMessage,
-    )
-  ) {
-    await onLog(
-      "stdout",
-      `[paperclip] OpenCode auto-rejected a permission prompt (non-interactive run); retrying once without session resume.\n`,
-    );
-    const retry = await runAttempt(null);
-    return toResult(retry, true);
-  }
-
-  if (
-    initialFailed &&
-    isOpenCodeStaleWorkspaceFileError(
-      initial.proc.stdout,
-      initial.rawStderr,
-      initial.parsed.errorMessage,
-    )
-  ) {
-    await onLog(
-      "stdout",
-      sessionId
-        ? `[paperclip] OpenCode reported a workspace file changed after it was read (likely concurrent edit); retrying once without session resume.\n`
-        : `[paperclip] OpenCode reported a workspace file changed after it was read; retrying the run once.\n`,
-    );
-    const retry = await runAttempt(null);
-    return toResult(retry, Boolean(sessionId));
-  }
-
-  return toResult(initial);
 }

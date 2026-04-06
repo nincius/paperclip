@@ -25,6 +25,16 @@ console.log(JSON.stringify({ type: "run.completed", usage: { inputTokens: 1, out
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeFakeOpenCodeCommandNonZeroAfterStop(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "text", sessionID: "ses_ignorable", part: { text: "completed work" } }));
+console.log(JSON.stringify({ type: "step_finish", sessionID: "ses_ignorable", part: { reason: "stop", cost: 0.001, tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 0, write: 0 } } } }));
+process.exit(17);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 describe("opencode execute", () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -176,6 +186,56 @@ describe("opencode execute", () => {
       const stdout = result.resultJson && typeof result.resultJson.stdout === "string" ? result.resultJson.stdout : "";
       expect(stdout).toMatch(/read.+ask/);
       expect(stdout).toMatch(/external_directory.+allow/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats non-zero exit as success when stdout ends with step_finish stop and no stderr error", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-ignorable-nonzero-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "opencode");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeOpenCodeCommandNonZeroAfterStop(commandPath);
+
+    mockEnsureOpenCodeModelConfiguredAndAvailable.mockResolvedValue(undefined);
+
+    try {
+      const result = await execute({
+        runId: "run-opencode-ignorable-nonzero",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claudio",
+          adapterType: "opencode_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "opencode/qwen3.6-plus-free",
+          promptTemplate: "Continue the assigned work.",
+        },
+        context: {},
+        authToken: "run-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(17);
+      expect(result.errorMessage).toBeNull();
+      expect(result.errorCode).toBeNull();
+      expect(result.resultJson).toMatchObject({
+        paperclip: {
+          ignoredNonZeroExitCode: 17,
+          reason: "opencode_last_step_finish_stop",
+        },
+      });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

@@ -125,6 +125,11 @@ export const ISSUE_STATUSES = [
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 
+/** Default status filter for "mine" inbox queries (all except cancelled). */
+export const INBOX_MINE_ISSUE_STATUS_FILTER = ISSUE_STATUSES.filter(
+  (status) => status !== "cancelled",
+).join(",");
+
 /** Single-status group for backlog-only filters and queries. */
 export const ISSUE_BACKLOG_STATUSES = ["backlog"] as const satisfies readonly IssueStatus[];
 

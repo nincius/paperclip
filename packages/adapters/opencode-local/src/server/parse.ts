@@ -1,5 +1,14 @@
 import { asNumber, asString, parseJson, parseObject } from "@paperclipai/adapter-utils/server-utils";
 
+function firstNonEmptyLine(text: string): string {
+  return (
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? ""
+  );
+}
+
 function errorText(value: unknown): string {
   if (typeof value === "string") return value;
   const rec = parseObject(value);
@@ -19,10 +28,27 @@ function errorText(value: unknown): string {
   }
 }
 
+/**
+ * OpenCode can exit non-zero after a successful streamed run. When JSONL ends in `step_finish`
+ * with reason `stop` and no parsed error/stderr, callers may treat this as a successful outcome.
+ */
+export function opencodeStdoutIndicatesIgnorableNonZeroExit(
+  parsed: { lastStepFinishReason: string | null; errorMessage: string | null },
+  stderr: string,
+): boolean {
+  const parsedError = typeof parsed.errorMessage === "string" ? parsed.errorMessage.trim() : "";
+  return (
+    parsed.lastStepFinishReason === "stop" &&
+    parsedError.length === 0 &&
+    !firstNonEmptyLine(stderr)
+  );
+}
+
 export function parseOpenCodeJsonl(stdout: string) {
   let sessionId: string | null = null;
   const messages: string[] = [];
   const errors: string[] = [];
+  let lastStepFinishReason: string | null = null;
   const usage = {
     inputTokens: 0,
     cachedInputTokens: 0,
@@ -51,6 +77,8 @@ export function parseOpenCodeJsonl(stdout: string) {
 
     if (type === "step_finish") {
       const part = parseObject(event.part);
+      const reason = asString(part.reason, "").trim();
+      if (reason) lastStepFinishReason = reason;
       const tokens = parseObject(part.tokens);
       const cache = parseObject(tokens.cache);
       usage.inputTokens += asNumber(tokens.input, 0);
@@ -83,6 +111,7 @@ export function parseOpenCodeJsonl(stdout: string) {
     usage,
     costUsd,
     errorMessage: errors.length > 0 ? errors.join("\n") : null,
+    lastStepFinishReason,
   };
 }
 

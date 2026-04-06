@@ -4,6 +4,9 @@
 
 ### Patch Changes
 
+- Treat non-zero `opencode run` exits as heartbeat success when JSONL ends with `step_finish` reason `stop`, no parsed error is present, and stderr is empty; preserve the real `exitCode` for diagnostics while setting `resultJson.paperclip.ignoredNonZeroExitCode` (`reason: opencode_last_step_finish_stop`) so server heartbeat outcome logic aligns with successful streamed work.
+- Fix `execute` control flow so session-retry branches (unknown session, permission auto-reject, stale workspace file) stay inside the async `try` block; this resolves LaunchAgent startup/runtime transpile failures caused by stray `await` usage outside an async function.
+- `execute` now treats non-timeout OpenCode model-discovery failures (`opencode models` unexpected errors) as runtime warnings and continues with the configured model; explicit `Configured OpenCode model is unavailable` remains a hard error.
 - Treat heartbeat workspace `source` **`adapter_config`** like **`agent_home`** when applying optional adapter `cwd` override.
 - `execute`: treat API-key-related stderr/parsed errors case-sensitively on the already-lowercased blob (drop redundant `/i` on the API key regex); log a **warning** when `OPENCODE_PERMISSION` JSON cannot be parsed or normalized, then continue with `external_directory: "allow"`.
 - Environment test (`testEnvironment`) refactors OpenCode model discovery into a shared helper, aligns discovery failure levels with whether a model ID is configured, and clarifies `opencode_hello_probe_model_unavailable` messaging when no model is set.

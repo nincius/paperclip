@@ -67,14 +67,7 @@ import {
 import {
   agentConfigurationDoc as piAgentConfigurationDoc,
 } from "@paperclipai/adapter-pi-local";
-import {
-  execute as hermesExecute,
-  testEnvironment as hermesTestEnvironment,
-  sessionCodec as hermesSessionCodec,
-  listSkills as hermesListSkills,
-  syncSkills as hermesSyncSkills,
-  detectModel as detectModelFromHermes,
-} from "hermes-paperclip-adapter/server";
+import * as hermesServer from "hermes-paperclip-adapter/server";
 import {
   agentConfigurationDoc as hermesAgentConfigurationDoc,
   models as hermesModels,
@@ -180,15 +173,18 @@ const piLocalAdapter: ServerAdapterModule = {
 
 const hermesLocalAdapter: ServerAdapterModule = {
   type: "hermes_local",
-  execute: hermesExecute,
-  testEnvironment: hermesTestEnvironment,
-  sessionCodec: hermesSessionCodec,
-  listSkills: hermesListSkills,
-  syncSkills: hermesSyncSkills,
+  execute: hermesServer.execute,
+  testEnvironment: hermesServer.testEnvironment,
+  sessionCodec: hermesServer.sessionCodec,
+  listSkills: "listSkills" in hermesServer ? (hermesServer.listSkills as ServerAdapterModule["listSkills"]) : undefined,
+  syncSkills: "syncSkills" in hermesServer ? (hermesServer.syncSkills as ServerAdapterModule["syncSkills"]) : undefined,
   models: hermesModels,
   supportsLocalAgentJwt: true,
   agentConfigurationDoc: hermesAgentConfigurationDoc,
-  detectModel: () => detectModelFromHermes(),
+  detectModel:
+    "detectModel" in hermesServer
+      ? (() => (hermesServer.detectModel as NonNullable<ServerAdapterModule["detectModel"]>)())
+      : undefined,
 };
 
 const adaptersByType = new Map<string, ServerAdapterModule>();

@@ -1042,36 +1042,43 @@ export function issueService(db: Db) {
       }
 
       const issueIds = withOwners.map((row) => row.id);
-      const statsRows = await db
-        .select({
-          issueId: issueComments.issueId,
-          myLastCommentAt: sql<Date | null>`
-            MAX(CASE WHEN ${issueComments.authorUserId} = ${contextUserId} THEN ${issueComments.createdAt} END)
-          `,
-          lastExternalCommentAt: sql<Date | null>`
-            MAX(
-              CASE
-                WHEN ${issueComments.authorUserId} IS NULL OR ${issueComments.authorUserId} <> ${contextUserId}
-                THEN ${issueComments.createdAt}
-              END
-            )
-            .groupBy(issueComments.issueId)
-          : Promise.resolve([]),
-        contextUserId
-          ? db
-            .select({
-              issueId: issueReadStates.issueId,
-              myLastReadAt: issueReadStates.lastReadAt,
-            })
-            .from(issueReadStates)
-            .where(
-              and(
-                eq(issueReadStates.companyId, companyId),
-                eq(issueReadStates.userId, contextUserId),
-                inArray(issueReadStates.issueId, issueIds),
-              ),
-            )
-          : Promise.resolve([]),
+      const [statsRows, readRows, lastActivityRows] = await Promise.all([
+        db
+          .select({
+            issueId: issueComments.issueId,
+            myLastCommentAt: sql<Date | null>`
+              MAX(CASE WHEN ${issueComments.authorUserId} = ${contextUserId} THEN ${issueComments.createdAt} END)
+            `,
+            lastExternalCommentAt: sql<Date | null>`
+              MAX(
+                CASE
+                  WHEN ${issueComments.authorUserId} IS NULL OR ${issueComments.authorUserId} <> ${contextUserId}
+                  THEN ${issueComments.createdAt}
+                END
+              )
+            `,
+          })
+          .from(issueComments)
+          .where(
+            and(
+              eq(issueComments.companyId, companyId),
+              inArray(issueComments.issueId, issueIds),
+            ),
+          )
+          .groupBy(issueComments.issueId),
+        db
+          .select({
+            issueId: issueReadStates.issueId,
+            myLastReadAt: issueReadStates.lastReadAt,
+          })
+          .from(issueReadStates)
+          .where(
+            and(
+              eq(issueReadStates.companyId, companyId),
+              eq(issueReadStates.userId, contextUserId),
+              inArray(issueReadStates.issueId, issueIds),
+            ),
+          ),
         Promise.all([
           db
             .select({
