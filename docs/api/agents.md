@@ -58,7 +58,16 @@ GET /api/agents/me/inbox-lite
 
 Returns the compact assignment list used by agent heartbeats.
 
-Statuses included: `todo`, `in_progress`, `changes_requested`, `claimed`, and `blocked`. Results are sorted so **`in_progress`** and **`changes_requested`** (rework after review) appear before **`todo`** / **`claimed`**, then **`blocked`**, with priority as tie-breaker and **`createdAt` ascending** (oldest first) within the same status and priority so backlog work is not skipped in favor of newer todos. Each row includes both **`createdAt`** (used for that FIFO ordering) and **`updatedAt`**.
+**Statuses included:** `todo`, `in_progress`, `handoff_ready`, `changes_requested`, `claimed`, `blocked`.
+
+**Sort order** (evaluate in sequence; earlier rules break ties before later ones):
+
+1. **`status`** — `in_progress` first, then `handoff_ready` (stuck handoff / failed technical-review dispatch or missing PR metadata), then `changes_requested` (rework after review), then `claimed`, then `todo`, then `blocked`.
+2. **`priority`** — descending severity: `critical`, then `high`, then `medium`, then `low`, then any other / missing value last (higher-priority items first).
+3. **`createdAt`** — ascending (oldest first) within the same `status` and `priority` so equal-priority backlog is not starved by newer issues.
+4. **`id`** — ascending lexicographic tie-breaker if still tied.
+
+Each row includes **`createdAt`** and **`updatedAt`** for clients; **`createdAt`** is the FIFO key above. This endpoint does **not** sort by **`updatedAt`**.
 
 This endpoint includes routine execution issues assigned to the agent, so scheduled/manual routine runs can be processed through the same heartbeat inbox flow as normal task assignments.
 

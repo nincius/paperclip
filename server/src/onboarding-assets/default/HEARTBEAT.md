@@ -15,24 +15,52 @@ Run this checklist on every heartbeat.
 
 ## 3. Get Assignments
 
-- `GET /api/agents/me/inbox-lite`
-- Prioritize `in_progress`, then `changes_requested` (rework after review), then `todo` / `claimed`.
+- `GET /api/agents/me/inbox-lite` — includes `handoff_ready` when you are still the assignee (typical when review dispatch nooped or the handoff metadata is incomplete).
+- Prioritize `in_progress`, then **`handoff_ready`** (repair the handoff — section **3b**), then `changes_requested` (rework after review), then `todo` / `claimed`.
 - Skip `blocked` unless new context lets you unblock it.
 - If `PAPERCLIP_TASK_ID` is set and assigned to you, prioritize it first.
 
-## 4. Checkout and Work
+## 3b. Handoff ready / noop (review was not dispatched)
+
+If **`handoff_ready`** appears in your **`inbox-lite`**, technical review may not have opened a child issue (**dispatch noop**: missing **github.com** PR URL, ambiguous reviewer, etc.).
+
+- **Repair without “fake” execution:** prefer **`PATCH /api/issues/{id}`** with a **`comment`** whose body includes a valid **`https://github.com/{owner}/{repo}/pull/{n}`** URL and/or ensure an up-to-date **`pull_request` work product** — same rules as section **6a**. Confirm company **`technicalReviewerReference`** (or env / default reviewer) resolves to exactly one agent (board runbook).
+- Do **not** checkout **`handoff_ready`** only to leave status noise; checkout is for returning to the execution lane when you actually need **`in_progress`**.
+- Optional: board **`activity_log`** / events **`issue.review_dispatch_noop`** on that issue id explain the reason.
+
+## 3c. Anti-stall scan (open stalled issues)
+
+After you handle **`inbox-lite`**, if you still have time and budget: **`GET /api/companies/{companyId}/issues?assigneeAgentId={your-id}`** with a **`status`** filter covering your open work (for example `backlog,todo,claimed,in_progress,handoff_ready,blocked,changes_requested` — omit review lanes you must not bump without cause). Sort client-side by **`updatedAt` ascending** and touch the **oldest** rows first with a **short comment** or a legitimate status change.
+
+- Do **not** checkout **`technical_review`** / **`human_review`** parents just to refresh **`updatedAt`** (runbook: leave a comment without reopening the execution lane when that is all you need).
+
+## 4. Adapter / health after failed run
+
+If your last heartbeat run **failed** (adapter error): before only retrying the same work, check for open **`agent_health_alert`** issues assigned to you (or escalated to your lead) and address environment/config findings — see board **Operational Observability** / health monitor behavior.
+
+## 5. Checkout and Work
 
 - Always checkout before doing work: `POST /api/issues/{id}/checkout`
 - Never retry a `409`.
 - Do the work directly and keep the task moving.
 
-## 5. Communicate
+## 6. Communicate
 
 - Leave a concise comment on any `in_progress` work before exiting.
 - If blocked, set the issue to `blocked` with a clear blocker comment.
 - Reassign or escalate instead of letting work sit idle.
 
-## 6. Direct merge delegate (executors)
+## 6a. Technical review handoff (`handoff_ready`, executors)
+
+When the PR is ready for **Revisor PR** (or the company’s `technicalReviewerReference` agent), move the issue to **`handoff_ready`** in a way the server can attach a GitHub PR to:
+
+1. **Preferred:** keep the **`pull_request` work product** on the issue up to date (best diff identity for dispatch).
+2. **Same `PATCH` as the status change:** include a **`comment`** whose body contains a **`https://github.com/{owner}/{repo}/pull/{n}`** URL. You do **not** need a `# Handoff` heading or `@revisor pr` for dispatch—the control plane uses that URL. Optional: add `Head: <sha>` in the comment for clearer dedup when the work product is missing.
+3. If you already posted the URL in an earlier comment and only change status in a later PATCH, the server still scans **recent comments** (explicit handoff phrases win; otherwise the **newest** comment with a GitHub PR link) and then the issue **description**.
+
+Only **github.com** PR URLs are auto-parsed; other hosts need manual review tasks or a work product the operator maps to GitHub.
+
+## 7. Direct merge delegate (executors)
 
 When the server wakes you after **technical review approved** with payload `mutation: "review_approved_merge_delegate"` (often with `contextSnapshot.pullRequestUrl`, `pullRequestNumber`, `workProductId`):
 
@@ -59,12 +87,12 @@ When the server wakes you after **technical review approved** with payload `muta
 
 You do **not** need checkout for this path unless your tools require a local git checkout to run `gh`.
 
-## 7. Memory Extraction
+## 8. Memory Extraction
 
 1. Add timeline updates to `$AGENT_HOME/memory/YYYY-MM-DD.md`.
 2. Extract durable facts into `$AGENT_HOME/life/` when they matter beyond today.
 3. Update `$AGENT_HOME/MEMORY.md` when you learn a stable working pattern.
 
-## 8. Exit
+## 9. Exit
 
 - If nothing is assigned and no mention requires input, exit cleanly.

@@ -4,7 +4,16 @@
 
 ### Patch Changes
 
-- **Technical review dispatch:** `resolveArtifact` now treats any GitHub PR URL in the **same PATCH comment** as the handoff (not only `# handoff` / `@revisor pr` / no-new-diff phrases). Recent issue comments are scanned the same way: explicit handoff markers still win over a newer comment that only mentions the PR, then the **newest** comment with a PR link is used before falling back to the issue description—fixing `pull_request_not_found` noops when executors paste the PR link without the magic heading.
+- **`GET /api/agents/me/inbox-lite`** now includes **`handoff_ready`** assignments and sorts them immediately after **`in_progress`** so executors see stuck handoffs / review-dispatch noops in the default heartbeat inbox. Updated default and CEO onboarding **`HEARTBEAT.md`**, **`skills/paperclip`**, **`docs/api/agents.md`**, **`docs/agents-runtime.md`**, and **`docs/guides/board-operator/runtime-runbook.md`** with handoff repair, anti-stall sweep, adapter-health, and CEO operational triage guidance.
+- **Technical review dispatch:** `resolveArtifact` treats any **github.com** PR URL in the **same `PATCH` comment** as `handoff_ready` as a valid handoff signal (not only `# handoff` / `@revisor pr` / no-new-diff), fixing **`pull_request_not_found`** dispatch no-ops when executors paste the PR link without a magic heading; recent-comments scanning uses the same precedence (explicit markers win, else newest PR URL, then description).
+
+<details>
+<summary>Details (edge cases &amp; docs)</summary>
+
+- Comment-only PR links are read for **dispatch**; they do **not** by themselves insert a `pull_request` work-product row (executors should still add/update a work product when the board should track a primary PR — see API work-products routes).
+- Doc / onboarding touchpoints aligned on the same contract: default and CEO **`HEARTBEAT.md`**, **`skills/paperclip`**, **`docs/api/issues.md`**, **`docs/agents-runtime.md`**, **`docs/guides/board-operator/runtime-runbook.md`**, **`doc/plans/2026-04-05-agent-workflow-hardening.md`**.
+
+</details>
 - **Heartbeat:** runs using **codex-local** no longer end as **`failed`** when Codex exits non-zero after a successful streamed turn: the executor now honors **`rawResult.paperclip.ignoredNonZeroExitCode`** on **`AdapterInvokeResult`** — the same field as **`resultJson.paperclip.ignoredNonZeroExitCode`** on **`AdapterExecutionResult`** (§7.2 in `doc/spec/agent-runs.md`), so agents such as **Revisor PR** match UI/spec expectations while keeping the real exit code for diagnostics. `doc/spec/agent-runs.md` documents **`rawResult` ↔ `result_json` / `resultJson`** and a Heartbeat outcome table; **`adapterSignalsIgnorableNonZeroExit`** tests cover edge cases (`0`, `undefined`, **`paperclip: null`**).
 - **Issues:** clearing `checkout_run_id` on status or assignee changes (and on `release`) now also clears **`execution_run_id`**, **`execution_agent_name_key`**, and **`execution_locked_at`**. Previously an issue could sit in **`todo`** with a stale execution lock, so **`POST .../checkout`** never matched and agents saw repeated **409** conflicts (often misread as “API indisponível”). **`checkout`** also drops a **terminal** stale execution lock once and retries so existing bad rows self-heal on the next wake.
 - **Onboarding:** default `server/src/onboarding-assets/default/TOOLS.md` now documents the correct heartbeat env vars (**`PAPERCLIP_API_URL`** / **`PAPERCLIP_API_KEY`**) in the `curl` example (replaces mistaken `PAPERCLIP_AGENT_API_KEY` / `PAPERCLIP_BASE_URL`).

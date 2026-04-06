@@ -398,7 +398,7 @@ describe("agent permission routes", () => {
     expect(res.status).toBe(200);
     expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
       assigneeAgentId: agentId,
-      status: "todo,in_progress,changes_requested,claimed,blocked",
+      status: "todo,in_progress,handoff_ready,changes_requested,claimed,blocked",
       includeRoutineExecutions: true,
     });
     expect(res.body).toEqual([
@@ -498,5 +498,105 @@ describe("agent permission routes", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.map((row: { identifier: string }) => row.identifier)).toEqual(["TCN-19", "TCN-20"]);
+  });
+
+  it("includes handoff_ready issues assigned to the agent in inbox-lite", async () => {
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: "issue-ho",
+        identifier: "TCN-620",
+        title: "Fix handoff PR URL",
+        status: "handoff_ready",
+        priority: "high",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        createdAt: new Date("2026-04-01T12:00:00.000Z"),
+        updatedAt: new Date("2026-04-04T10:00:00.000Z"),
+        activeRun: null,
+        originKind: "manual",
+      },
+    ]);
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "api_key",
+    });
+
+    const res = await request(app).get("/api/agents/me/inbox-lite");
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
+      assigneeAgentId: agentId,
+      status: "todo,in_progress,handoff_ready,changes_requested,claimed,blocked",
+      includeRoutineExecutions: true,
+    });
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        identifier: "TCN-620",
+        status: "handoff_ready",
+      }),
+    ]);
+  });
+
+  it("sorts inbox-lite so handoff_ready ranks after in_progress and before changes_requested", async () => {
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: "issue-chg",
+        identifier: "TCN-31",
+        title: "Rework",
+        status: "changes_requested",
+        priority: "medium",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        createdAt: new Date("2026-03-28T12:00:00.000Z"),
+        updatedAt: new Date("2026-03-30T10:00:00.000Z"),
+        activeRun: null,
+        originKind: "manual",
+      },
+      {
+        id: "issue-ho",
+        identifier: "TCN-30",
+        title: "Stuck handoff",
+        status: "handoff_ready",
+        priority: "medium",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        createdAt: new Date("2026-03-29T12:00:00.000Z"),
+        updatedAt: new Date("2026-04-01T10:00:00.000Z"),
+        activeRun: null,
+        originKind: "manual",
+      },
+      {
+        id: "issue-wip",
+        identifier: "TCN-29",
+        title: "Active",
+        status: "in_progress",
+        priority: "medium",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        createdAt: new Date("2026-03-27T12:00:00.000Z"),
+        updatedAt: new Date("2026-04-05T10:00:00.000Z"),
+        activeRun: null,
+        originKind: "manual",
+      },
+    ]);
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "api_key",
+    });
+
+    const res = await request(app).get("/api/agents/me/inbox-lite");
+
+    expect(res.status).toBe(200);
+    expect(res.body.map((row: { identifier: string }) => row.identifier)).toEqual(["TCN-29", "TCN-30", "TCN-31"]);
   });
 });

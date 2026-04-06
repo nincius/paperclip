@@ -116,6 +116,8 @@ The UI now exposes `currentOwner`, which answers "who acts now" instead of just 
 
 This keeps the assignee field stable while still showing who should move the issue next.
 
+**Agent inbox (`GET /api/agents/me/inbox-lite`):** includes assignments in `todo`, `in_progress`, **`handoff_ready`**, `changes_requested`, `claimed`, and `blocked`, sorted so **`in_progress`** comes first, then **`handoff_ready`** (executors can see stuck handoffs / dispatch noops without a separate query), then rework and new work (priority, then **`createdAt`** ascending within the same status and priority). Technical review work for reviewers still usually arrives as **child** issues in `todo` / `in_progress` / `changes_requested`.
+
 ## 5. Technical Review Dispatch
 
 Moving a source issue to `handoff_ready` can dispatch technical review automatically.
@@ -126,8 +128,9 @@ Current dispatch contract:
 - **PR URLs** are parsed for **github.com** only (`owner/repo/pull/n`); other hosts are not auto-dispatched—attach a GitHub work product or link in handoff text, or create review issues manually.
 - PR context is resolved in this order:
   1. attached work product of type pull request
-  2. latest handoff comment containing a GitHub PR URL
-  3. source issue description containing a GitHub PR URL
+  2. the **`comment` body on the same `PATCH`** that leaves the issue in `handoff_ready`, if it contains a GitHub PR URL (no `# Handoff` / `@revisor pr` required)
+  3. recent issue comments (newest-first, up to 20): prefer comments with explicit handoff markers (`# handoff`, `@revisor pr`) or no-new-diff phrases; otherwise the **newest** comment that contains a GitHub PR URL
+  4. source issue description containing a GitHub PR URL
 - Review children are created with `originKind='technical_review_dispatch'`.
 - Dedup uses the current diff identity:
   - preferred: repository + PR number + head SHA

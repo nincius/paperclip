@@ -24,9 +24,9 @@ If `PAPERCLIP_APPROVAL_ID` is set:
 
 ## 4. Get Assignments
 
-- Prefer `GET /api/agents/me/inbox-lite` when acting as a managed agent; it includes `changes_requested` / `claimed` and orders work for you.
-- Otherwise: `GET /api/companies/{companyId}/issues?assigneeAgentId={your-id}&status=todo,in_progress,changes_requested,claimed,blocked`
-- Prioritize: `in_progress` first, then `changes_requested`, then `todo` / `claimed`. Skip `blocked` unless you can unblock it.
+- Prefer `GET /api/agents/me/inbox-lite` when acting as a managed agent; it includes **`handoff_ready`** (stuck handoff / noop recovery), `changes_requested` / `claimed`, and sorts work for you.
+- Otherwise: `GET /api/companies/{companyId}/issues?assigneeAgentId={your-id}&status=todo,in_progress,handoff_ready,changes_requested,claimed,blocked`
+- Prioritize: `in_progress` first, then **`handoff_ready`** (delegate or have the executor repair PR / reviewer per the executor onboarding template [`../default/HEARTBEAT.md`](../default/HEARTBEAT.md) section **6a — Technical review handoff**), then `changes_requested`, then **`claimed`**, then **`todo`**. Skip `blocked` unless you can unblock it.
 - If there is already an active run on an `in_progress` task, just move on to the next thing.
 - If `PAPERCLIP_TASK_ID` is set and assigned to you, prioritize that task.
 
@@ -41,6 +41,7 @@ If `PAPERCLIP_APPROVAL_ID` is set:
 - Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`.
 - Use `paperclip-create-agent` skill when hiring new agents.
 - Assign work to the right agent for the job.
+- For PR execution lanes: executor agents should follow **Technical review handoff** in [`../default/HEARTBEAT.md`](../default/HEARTBEAT.md) (section **6a**): same `PATCH` as `handoff_ready` with a **github.com** PR URL in the `comment` body (or a pull-request work product), so review dispatch does not noop.
 
 ## 7. Fact Extraction
 
@@ -64,6 +65,11 @@ If `PAPERCLIP_APPROVAL_ID` is set:
 - Budget awareness: Above 80% spend, focus only on critical tasks.
 - Never look for unassigned work -- only work on what is assigned to you.
 - Never cancel cross-team tasks -- reassign to the relevant manager with a comment.
+- **Operational triage (dashboard signals):** When **review dispatch no-ops**, a deep **technical queue**, or **merge-delegate wakeup failures** show up on the board:
+  1. **Query:** `GET /api/companies/{companyId}/issues?status=handoff_ready,technical_review` (add **`changes_requested`** if useful for your sweep).
+  2. **Sort:** client-side by **`updatedAt`** ascending (stale / oldest first).
+  3. **Act per issue:** delegate, comment, or fix **`technicalReviewerReference`** and executor handoffs so PR URLs and reviewer resolution match [`docs/guides/board-operator/runtime-runbook.md`](../../../../docs/guides/board-operator/runtime-runbook.md) (**Technical Review Dispatch**).
+  4. **Correlate:** map **`issue.review_dispatch_noop`** and **`issue.merge_delegate_wakeup_failed`** activity/events to the affected issues while triaging.
 
 ## Rules
 

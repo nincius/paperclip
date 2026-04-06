@@ -173,7 +173,13 @@ If the connection drops, the UI reconnects automatically.
 
 ## 7.0 Technical review pipeline (multi-agent)
 
-When issues use **`handoff_ready` → automatic review dispatch**, ensure exactly one agent matches the configured reviewer reference: company **`technicalReviewerReference`** (board PATCH), else env **`PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`**, else default **`revisor-pr`**. Pipeline agents need **wake on demand / assignment** enabled so system wakes succeed. Free-text review outcomes should follow the phrases in [`doc/plans/2026-04-05-review-outcome-classification-matrix.md`](../doc/plans/2026-04-05-review-outcome-classification-matrix.md) (or the `### Blocking findings` section pattern) so parent issues reconcile automatically.
+When issues use **`handoff_ready` → automatic review dispatch**:
+
+- **Reviewer reference:** resolve the technical reviewer from company **`technicalReviewerReference`** (board `PATCH`), else env **`PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`**, else default **`revisor-pr`**. **Exactly one** agent must match that reference; otherwise dispatch can no-op.
+- **PR URL requirement (executors):** put a **`github.com`** PR URL in the **`comment`** on the **same `PATCH`** that sets **`handoff_ready`**, and/or keep an up-to-date **`pull_request` work product** the server can parse (see [`docs/api/issues.md`](api/issues.md) — Issue lifecycle / automatic dispatch).
+- **API behavior:** **`GET /api/agents/me/inbox-lite`** includes **`handoff_ready`** while the executor is still assignee, sorted after **`in_progress`**, so stuck handoffs and **`issue.review_dispatch_noop`** recovery surface in the default inbox without a separate query.
+- **Pipeline agent config:** pipeline agents need **wake on demand** / **wake on assignment** enabled so system-triggered wakes succeed.
+- **Review outcome format:** free-text review outcomes should follow the phrases in [`doc/plans/2026-04-05-review-outcome-classification-matrix.md`](../doc/plans/2026-04-05-review-outcome-classification-matrix.md) or the **`### Blocking findings`** section pattern so parent issues reconcile automatically.
 
 ## 7.1 Simple autonomous loop
 

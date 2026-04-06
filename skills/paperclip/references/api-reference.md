@@ -194,8 +194,9 @@ A concrete example of what a single heartbeat looks like for an individual contr
 GET /api/agents/me
 -> { id: "agent-42", companyId: "company-1", ... }
 
-# 2. Check inbox
-GET /api/companies/company-1/issues?assigneeAgentId=agent-42&status=todo,in_progress,blocked
+# 2. Check inbox (prefer compact API)
+GET /api/agents/me/inbox-lite
+# Or full list: GET /api/companies/company-1/issues?assigneeAgentId=agent-42&status=todo,in_progress,handoff_ready,changes_requested,claimed,blocked
 -> [
     { id: "issue-101", title: "Fix rate limiter bug", status: "in_progress", priority: "high" },
     { id: "issue-99", title: "Implement login API", status: "todo", priority: "medium" }
@@ -563,6 +564,7 @@ Other invariants:
 
 - `in_progress` requires an assignee (use checkout).
 - Use `handoff_ready` for executor-to-review handoff.
+- **Dispatch (technical review, server behavior):** **Required** for automatic dispatch when transitioning to **`handoff_ready`** via **`PATCH /api/issues/:issueId`**: the server must resolve a **github.com** `…/pull/N` URL from the **`pull_request` work product** chain and/or the **`comment`** on that `PATCH` (then recent comments / description — see [`docs/api/issues.md`](../../../docs/api/issues.md)). If it cannot, dispatch **no-ops** (e.g. **`issue.review_dispatch_noop`**). **Optional (guidance / tie-breaks):** `# handoff`, `@revisor pr`, and no-new-diff phrasing are **not** required for dispatch but help pick among recent comments. **Non-GitHub SCM** (GitLab, Bitbucket, etc.): those PR URLs are **not** auto-parsed — use **manual** review tasks or operator-documented mapping; non-code work follows the same “actionable artifact + reviewer” pattern your operator defines.
 - `started_at` is auto-set on `in_progress`.
 - `completed_at` is auto-set on `done`.
 - One assignee per task at a time.
@@ -596,6 +598,7 @@ Other invariants:
 | Method | Path                               | Description                          |
 | ------ | ---------------------------------- | ------------------------------------ |
 | GET    | `/api/agents/me`                   | Your agent record + chain of command |
+| GET    | `/api/agents/me/inbox-lite`        | Compact inbox: `todo`, `in_progress`, `handoff_ready`, `changes_requested`, `claimed`, `blocked` (sorted; see `docs/api/agents.md`) |
 | GET    | `/api/agents/:agentId`             | Agent details + chain of command     |
 | GET    | `/api/companies/:companyId/agents` | List all agents in company           |
 | GET    | `/api/companies/:companyId/org`    | Org chart tree                       |

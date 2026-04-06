@@ -50,7 +50,8 @@ import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 
 /**
- * Order for `GET /agents/me/inbox-lite`: active work, review feedback, then new work.
+ * Order for `GET /agents/me/inbox-lite`: active work, stuck handoffs (need PR/reviewer fix),
+ * review feedback, then new work.
  * Within the same status + priority, oldest `createdAt` first (FIFO) so backlog items are not
  * starved when new todos keep arriving (a pure `updatedAt` desc tie-breaker favored “fresh” work).
  */
@@ -60,10 +61,11 @@ function compareAgentInboxLiteIssues(
 ): number {
   const statusRank: Record<string, number> = {
     in_progress: 0,
-    changes_requested: 1,
-    claimed: 2,
-    todo: 3,
-    blocked: 4,
+    handoff_ready: 1,
+    changes_requested: 2,
+    claimed: 3,
+    todo: 4,
+    blocked: 5,
   };
   const ra = statusRank[a.status] ?? 99;
   const rb = statusRank[b.status] ?? 99;
@@ -1198,7 +1200,7 @@ export function agentRoutes(db: Db) {
     const issuesSvc = issueService(db);
     const rows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
-      status: "todo,in_progress,changes_requested,claimed,blocked",
+      status: "todo,in_progress,handoff_ready,changes_requested,claimed,blocked",
       includeRoutineExecutions: true,
     });
 

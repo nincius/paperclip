@@ -26,7 +26,7 @@ Automated reconciliation also moves parent from `handoff_ready` → `technical_r
 ### 3.1 `reviewDispatch.dispatchForIssue`
 
 - **Where:** [`server/src/routes/issues.ts`](../../server/src/routes/issues.ts) — after `PATCH` updates an issue; when resulting `issue.status === "handoff_ready"`.
-- **Behavior:** Resolves technical reviewer reference (company `technical_reviewer_reference`, then `PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`, then default `revisor-pr`), resolves PR artifact (GitHub URLs only), deduplicates by diff identity, may create child issue with `originKind: technical_review_dispatch`.
+- **Behavior:** Resolves technical reviewer reference (company `technical_reviewer_reference`, then `PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`, then default `revisor-pr`), resolves PR artifact (GitHub URLs only): work product → same-PATCH `comment` with PR URL → recent comments (handoff/no-new-diff phrases preferred, else newest PR URL) → description; deduplicates by diff identity; may create child issue with `originKind: technical_review_dispatch`.
 - **Noop reasons:** `issue_not_found`, `status_not_handoff_ready`, `reviewer_not_found`, `reviewer_ambiguous`, `pull_request_not_found`.
 - **Activity:** `issue.review_dispatch_noop` logged for reviewer/PR noops (observability).
 
