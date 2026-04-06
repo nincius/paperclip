@@ -53,3 +53,5 @@ Set monthly budgets at both the company and per-agent level. Paperclip enforces:
 ## Step 6: Launch
 
 Enable heartbeats for your agents and they'll start working. Monitor progress from the dashboard.
+
+When you add a technical reviewer agent (e.g. **Revisor PR**), that hire is the typical target for automated technical-review handoffs. Optionally set **Company Settings → Technical review → Technical reviewer for dispatch** so dispatch points at the right agent; see [Runtime runbook — Technical Review Dispatch](./runtime-runbook.md#5-technical-review-dispatch) for fallback order and PR requirements.

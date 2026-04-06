@@ -1,9 +1,13 @@
-import { ChangeEvent, useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { Agent } from "@paperclipai/shared";
+import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
+import { ApiError } from "../api/client";
 import { companiesApi } from "../api/companies";
+import { agentsApi } from "../api/agents";
 import { accessApi } from "../api/access";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
@@ -21,6 +25,37 @@ type AgentSnippetInput = {
   connectionCandidates?: string[] | null;
   testResolutionUrl?: string | null;
 };
+
+function refToTechnicalReviewerDraft(
+  ref: string | null,
+  agentsActive: Agent[],
+): { draft: string | null; unmatched: string | null } {
+  if (!ref?.trim()) return { draft: null, unmatched: null };
+  const t = ref.trim();
+  if (isUuidLike(t)) {
+    const row = agentsActive.find((x) => x.id === t);
+    if (row) return { draft: row.id, unmatched: null };
+    return { draft: null, unmatched: t };
+  }
+  const key = normalizeAgentUrlKey(t);
+  if (key) {
+    const match =
+      agentsActive.find((a) => normalizeAgentUrlKey(a.urlKey) === key)
+      ?? agentsActive.find((a) => normalizeAgentUrlKey(a.name) === key);
+    if (match) return { draft: match.id, unmatched: null };
+  }
+  return { draft: null, unmatched: t };
+}
+
+function technicalReviewerSelectionKey(
+  ref: string | null | undefined,
+  agentsActive: Agent[],
+): string {
+  const { draft, unmatched } = refToTechnicalReviewerDraft(ref ?? null, agentsActive);
+  if (unmatched) return `unresolved:${unmatched}`;
+  if (draft === null) return "default";
+  return draft;
+}
 
 export function CompanySettings() {
   const {
@@ -78,6 +113,45 @@ export function CompanySettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     }
+  });
+
+  const { data: agentsData = [] } = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId ?? "__none__"),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  const agentsActive = useMemo(
+    () => agentsData.filter((a) => a.status !== "terminated"),
+    [agentsData],
+  );
+
+  const [technicalReviewerLocal, setTechnicalReviewerLocal] = useState<string | null>(null);
+  const [technicalReviewerUnmatched, setTechnicalReviewerUnmatched] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedCompany) return;
+    const { draft, unmatched } = refToTechnicalReviewerDraft(
+      selectedCompany.technicalReviewerReference,
+      agentsActive,
+    );
+    setTechnicalReviewerLocal(draft);
+    setTechnicalReviewerUnmatched(unmatched);
+  }, [selectedCompany?.id, selectedCompany?.technicalReviewerReference, agentsActive]);
+
+  const technicalReviewerDirty =
+    Boolean(selectedCompany) &&
+    technicalReviewerSelectionKey(
+      selectedCompany?.technicalReviewerReference ?? null,
+      agentsActive,
+    ) !== (technicalReviewerLocal === null ? "default" : technicalReviewerLocal);
+
+  const reviewerMutation = useMutation({
+    mutationFn: (technicalReviewerReference: string | null) =>
+      companiesApi.update(selectedCompanyId!, { technicalReviewerReference }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    },
   });
 
   const inviteMutation = useMutation({
@@ -388,6 +462,83 @@ export function CompanySettings() {
             checked={!!selectedCompany.requireBoardApprovalForNewAgents}
             onChange={(v) => settingsMutation.mutate(v)}
           />
+        </div>
+      </div>
+
+      {/* Technical review */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Technical review
+        </div>
+        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+          <Field
+            label="Technical reviewer for dispatch"
+            hint="Agent that receives automatic technical_review_dispatch work when parent issues are in handoff_ready. Company override is optional: when unset, the server uses PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE, then the default name reference revisor-pr (exactly one matching non-terminated agent). Dispatch still requires a GitHub PR URL on the work product, a comment, or the issue description."
+          >
+            <div className="space-y-2">
+              {technicalReviewerUnmatched ? (
+                <p className="text-xs text-amber-600 dark:text-amber-500">
+                  Stored reference does not match any active agent in this company:{" "}
+                  <code className="rounded bg-muted px-1 font-mono">{technicalReviewerUnmatched}</code>.
+                  Pick Default to clear the override, or choose an agent and save to replace it.
+                </p>
+              ) : null}
+              <select
+                className="w-full max-w-md rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                value={technicalReviewerLocal === null ? "" : technicalReviewerLocal}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setTechnicalReviewerLocal(v === "" ? null : v);
+                  setTechnicalReviewerUnmatched(null);
+                }}
+                disabled={reviewerMutation.isPending}
+              >
+                <option value="">Default (instance env + revisor-pr)</option>
+                {agentsActive.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </Field>
+          {technicalReviewerDirty ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => reviewerMutation.mutate(technicalReviewerLocal)}
+                disabled={reviewerMutation.isPending}
+              >
+                {reviewerMutation.isPending ? "Saving..." : "Save technical reviewer"}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                type="button"
+                onClick={() => {
+                  if (!selectedCompany) return;
+                  const { draft, unmatched } = refToTechnicalReviewerDraft(
+                    selectedCompany.technicalReviewerReference,
+                    agentsActive,
+                  );
+                  setTechnicalReviewerLocal(draft);
+                  setTechnicalReviewerUnmatched(unmatched);
+                }}
+                disabled={reviewerMutation.isPending}
+              >
+                Reset
+              </Button>
+            </div>
+          ) : null}
+          {reviewerMutation.isError ? (
+            <span className="text-xs text-destructive">
+              {reviewerMutation.error instanceof ApiError
+                ? reviewerMutation.error.message
+                : reviewerMutation.error instanceof Error
+                  ? reviewerMutation.error.message
+                  : "Failed to save"}
+            </span>
+          ) : null}
         </div>
       </div>
 

@@ -124,7 +124,13 @@ Moving a source issue to `handoff_ready` can dispatch technical review automatic
 
 Current dispatch contract:
 
-- **Reviewer** is resolved in order: company field `technicalReviewerReference` (PATCH `/api/companies/{companyId}`), then env `PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`, then default agent name reference `revisor-pr` (must match a single non-terminated agent in the company; duplicate name slugs → dispatch noop `reviewer_ambiguous`).
+- **Reviewer** resolution order:
+  - Company field `technicalReviewerReference`
+  - Env `PAPERCLIP_TECHNICAL_REVIEWER_REFERENCE`
+  - Default agent name reference `revisor-pr`
+- **Where to set the company field:** board **Company Settings** → *Technical review*, or PATCH `/api/companies/{companyId}`.
+- **Match rule:** the resolved reference must match a single non-terminated agent in the company.
+- **Ambiguity:** when multiple agents match the resolved reference (e.g. duplicate name slugs), dispatch is a noop with reason `reviewer_ambiguous`.
 - **PR URLs** are parsed for **github.com** only (`owner/repo/pull/n`); other hosts are not auto-dispatched—attach a GitHub work product or link in handoff text, or create review issues manually.
 - PR context is resolved in this order:
   1. attached work product of type pull request
