@@ -128,6 +128,57 @@ describe("reviewDispatchService", () => {
     }));
   });
 
+  it("dispatches from the PATCH comment when it contains a GitHub PR URL without # handoff markers", async () => {
+    const createdReviewIssue = makeReviewIssue({
+      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
+      originId: "github:acme/app:pr:212:comment:comment-plain",
+    });
+    const plainHandoffComment = makeComment({
+      id: "comment-plain",
+      body: "PR pronto para revisão: https://github.com/acme/app/pull/212",
+    });
+
+    const agents = {
+      resolveByReference: vi.fn(async () => ({
+        agent: { id: "reviewer-1", companyId: "company-1", name: "Revisor PR", status: "idle" },
+        ambiguous: false,
+      })),
+    };
+    const issues = {
+      getById: vi.fn(async () => makeIssue()),
+      getComment: vi.fn(async () => plainHandoffComment),
+      listComments: vi.fn(async () => []),
+      list: vi.fn(async () => []),
+      create: vi.fn(async () => createdReviewIssue),
+    };
+    const workProducts = {
+      listForIssue: vi.fn(async () => []),
+    };
+
+    const svc = reviewDispatchService(testDb, createMockDeps({
+      agents,
+      issues,
+      workProducts,
+    }));
+    const result = await svc.dispatchForIssue({ issueId: "issue-1", commentId: "comment-plain" });
+
+    expect(result.kind).toBe("created");
+    expect(issues.create).toHaveBeenCalledTimes(1);
+    const [companyId, payload] = vi.mocked(issues.create).mock.calls[0] ?? [];
+    expect(companyId).toBe("company-1");
+    expect(payload).toMatchObject({
+      title: "Revisar PR #212 de TCN-15",
+      assigneeAgentId: "reviewer-1",
+      parentId: "issue-1",
+      originKind: REVIEW_DISPATCH_ORIGIN_KIND,
+      originId: "github:acme/app:pr:212:comment:comment-plain",
+    });
+    expect(payload?.description).toContain("[TCN-15](/TCN/issues/TCN-15)");
+    expect(payload?.description).toContain("/TCN/issues/TCN-15#comment-comment-plain");
+    expect(payload?.description).toContain("Handoff atual");
+    expect(payload?.description).toContain("https://github.com/acme/app/pull/212");
+  });
+
   it("reuses an existing historical review ticket seeded after the same handoff comment", async () => {
     const currentComment = makeComment();
     const existingReviewIssue = makeReviewIssue({

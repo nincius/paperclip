@@ -112,7 +112,21 @@ Control flow (happy path):
 6. Process exits, output parser updates run result + runtime state.
 7. Agent returns to `idle` or `error`; UI updates in real time.
 
-**Heartbeat executor:** The server records the adapter’s terminal status (`succeeded` / `failed` / `cancelled` / `timed_out`) once the outcome is known. If later bookkeeping (wakeup row, issue execution unlock, ledger, task session, or agent idle transition) throws, the run row keeps that terminal status instead of being overwritten as `failed`. Whitespace-only adapter `errorMessage` values are ignored when `exitCode` is `0`, so empty noise does not force a failure.
+**Heartbeat executor:** The server records the adapter’s terminal status (`succeeded` / `failed` / `cancelled` / `timed_out`) once the outcome is known. If later bookkeeping (wakeup row, issue execution unlock, ledger, task session, or agent idle transition) throws, the run row keeps that terminal status instead of being overwritten as `failed`.
+
+Whitespace-only adapter `errorMessage` values are treated like omitted text when classifying success vs failure, so empty noise does not force a failure. When the adapter omits a meaningful `errorMessage` but sets **`rawResult.paperclip.ignoredNonZeroExitCode`**, the Heartbeat executor marks the run **`succeeded`** while still **persisting** the real process **`exitCode`** on the run row (`heartbeat_runs.exit_code`). That flag is the same field as **`resultJson.paperclip.ignoredNonZeroExitCode`** on **`AdapterExecutionResult`** and, after the server has copied it into **`heartbeat_runs.result_json`**, as **`result_json.paperclip.ignoredNonZeroExitCode`** (see §6).
+
+Run outcome (Heartbeat executor): first, if the run row is already **`cancelled`** → outcome **`cancelled`**. Else if **`adapterResult.timedOut`** → **`timed_out`**. Otherwise apply the table below. **`—`** means “any value” for that column.
+
+| `errorMessage` (after trim) | `exitCode` (effective `(exitCode ?? 0)`) | `resultJson.paperclip.ignoredNonZeroExitCode` | Outcome |
+| --- | --- | --- | --- |
+| omitted, null, or whitespace-only | `0` | — | **`succeeded`** |
+| non-empty | `0` | — | **`failed`** (non-zero semantic error despite exit 0) |
+| omitted, null, or whitespace-only | non-zero | set per §6† | **`succeeded`** (real **`exitCode`** still stored on the run row) |
+| omitted, null, or whitespace-only | non-zero | absent, `null`, or `undefined`† | **`failed`** |
+| non-empty | non-zero | — | **`failed`** |
+
+† Matches server `adapterSignalsIgnorableNonZeroExit` on `resultJson`: **`paperclip`** must be a non-null object and **`ignoredNonZeroExitCode != null`** (so **`null`** or missing/`undefined` does not qualify; a present numeric **`0`** does qualify).
 
 ## 6. Agent Run Protocol (Version `agent-run/v1`)
 
@@ -178,6 +192,8 @@ interface AgentRunAdapter {
   invoke(input: AdapterInvokeInput, hooks: AdapterHooks, signal: AbortSignal): Promise<AdapterInvokeResult>;
 }
 ```
+
+**`rawResult` and `resultJson`:** `AdapterInvokeResult.rawResult` is the adapter’s structured JSON payload (typed as `Record<string, unknown> | null` in the protocol). The execution pipeline maps that value into **`AdapterExecutionResult.resultJson`** (same JSON shape; **not** a guarantee that the persisted row points at the adapter’s original in-memory object). In-process, **`resultJson`** is typically a plain object the adapter constructed (**shallow** assignment of top-level keys; nested values are ordinary JS references until serialized). The Heartbeat executor then persists **`resultJson`** on **`heartbeat_runs.result_json`**: Postgres **`jsonb`** stores a **JSON snapshot** at write time (serialize/deserialize), i.e. a **deep copy** of the JSON tree in the database, not a live pointer to adapter memory. **No server-side transformation** of adapter-authored fields (including **`paperclip`**) is applied on that path unless an adapter-specific implementation explicitly documents one—generic behavior is **copy/snapshot only**. Read **`ignoredNonZeroExitCode`** from **`rawResult.paperclip`** on the adapter invoke result, or equivalently from **`resultJson.paperclip`** on **`AdapterExecutionResult`** after mapping, or from **`heartbeat_runs.result_json.paperclip`** after persistence.
 
 ### 6.1 Required Behavior
 
@@ -317,7 +333,7 @@ Codex emits JSONL events. Parse line-by-line and extract:
 
 Codex JSONL currently may not include cost; store token usage and leave cost null/unknown unless available.
 
-**Process exit code:** The `codex` process may return a non-zero exit code even when the last stream event is `turn.completed` and JSONL carries no `error` / `turn.failed` message (and stderr is empty after adapter filtering). In that case Paperclip still treats the adapter outcome as success, records the real `exit_code` on the run row, and may add `resultJson.paperclip.ignoredNonZeroExitCode` for operators. If stderr has a non-empty first line or JSONL reports an error, non-zero exit remains a failure.
+**Process exit code:** The `codex` process may return a non-zero exit code even when the last stream event is **`turn.completed`** and JSONL carries no `error` / `turn.failed` message (and stderr is empty after adapter filtering). In that case Paperclip still treats the adapter outcome as success, records the real `exit_code` on the run row, and may set **`rawResult.paperclip.ignoredNonZeroExitCode`** (persisted as **`result_json.paperclip.ignoredNonZeroExitCode`**; see §6). If stderr has a non-empty first line or JSONL reports an error, non-zero exit remains a failure.
 
 ## 7.3 Common local adapter process handling
 

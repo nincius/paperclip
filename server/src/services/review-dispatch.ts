@@ -390,21 +390,24 @@ export function reviewDispatchService(db: Db, deps: ReviewDispatchDeps = {}) {
       if (artifact) return artifact;
     }
 
+    // Comment submitted in the same PATCH as `handoff_ready`: treat any GitHub PR URL as the handoff
+    // (executors often paste the PR link without `# handoff` / `@revisor pr` markers).
     if (comment) {
-      const shouldUseCurrentComment =
-        commentSignalsExplicitReviewHandoff(comment.body) || commentDeclaresNoNewDiff(comment.body);
-      if (shouldUseCurrentComment) {
-        const fromCurrentComment = buildCommentArtifact(sourceIssue, comment);
-        if (fromCurrentComment) return fromCurrentComment;
-      }
+      const fromCurrentComment = buildCommentArtifact(sourceIssue, comment);
+      if (fromCurrentComment) return fromCurrentComment;
     }
 
     const latestComments = await issues.listComments(sourceIssue.id, { order: "desc", limit: 20 });
+    let newestCommentWithPr: ReturnType<typeof buildCommentArtifact> = null;
     for (const entry of latestComments) {
-      if (!commentSignalsExplicitReviewHandoff(entry.body)) continue;
       const artifact = buildCommentArtifact(sourceIssue, entry);
-      if (artifact) return artifact;
+      if (!artifact) continue;
+      if (!newestCommentWithPr) newestCommentWithPr = artifact;
+      if (commentSignalsExplicitReviewHandoff(entry.body) || commentDeclaresNoNewDiff(entry.body)) {
+        return artifact;
+      }
     }
+    if (newestCommentWithPr) return newestCommentWithPr;
 
     return buildDescriptionArtifact(sourceIssue);
   }

@@ -32,6 +32,7 @@ import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } fr
 import { ensureAgentHomeDailyMemoryNote } from "./ensure-agent-daily-memory.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import { loadHeartbeatRunOperationalEffects } from "./heartbeat-run-effect.js";
+import { adapterSignalsIgnorableNonZeroExit } from "./heartbeat-adapter-outcome.js";
 import {
   buildWorkspaceReadyComment,
   cleanupExecutionWorkspaceArtifacts,
@@ -2880,7 +2881,10 @@ export function heartbeatService(db: Db) {
         outcome = "cancelled";
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
-      } else if ((adapterResult.exitCode ?? 0) === 0 && !trimmedAdapterError) {
+      } else if (
+        !trimmedAdapterError &&
+        ((adapterResult.exitCode ?? 0) === 0 || adapterSignalsIgnorableNonZeroExit(adapterResult))
+      ) {
         outcome = "succeeded";
       } else {
         outcome = "failed";
