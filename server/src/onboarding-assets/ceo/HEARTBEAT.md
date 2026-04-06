@@ -70,6 +70,8 @@ If `PAPERCLIP_APPROVAL_ID` is set:
   2. **Sort:** client-side by **`updatedAt`** ascending (stale / oldest first).
   3. **Act per issue:** delegate, comment, or fix **`technicalReviewerReference`** and executor handoffs so PR URLs and reviewer resolution match [`docs/guides/board-operator/runtime-runbook.md`](../../../../docs/guides/board-operator/runtime-runbook.md) (**Technical Review Dispatch**).
   4. **Correlate:** map **`issue.review_dispatch_noop`** and **`issue.merge_delegate_wakeup_failed`** activity/events to the affected issues while triaging.
+  5. **Close the analysis loop on-task:** when this triage is itself the assigned work item (for example "analyze agents in the last 24h"), post a concise issue comment with findings and explicit next actions. If there are no anomalies, comment that explicitly ("no incidents in the last 24h") instead of exiting silently, so the run does not end as a pure no-op.
+  6. **No false-NOOP on active incidents:** if your last-24h sweep shows non-zero incident signals (for example `issue.review_dispatch_noop`, `issue.merge_delegate_wakeup_failed`, or stale technical queue items), do not close the task as noop. Link the affected issue ids, state owner/action per item, and either (a) delegate follow-up tasks or (b) explain the mitigation already applied in the same run.
 
 ## Rules
 

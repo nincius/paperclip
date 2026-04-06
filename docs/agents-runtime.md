@@ -253,3 +253,34 @@ Start with least privilege where possible, and avoid exposing secrets in broad r
 5. Trigger a manual wakeup.
 6. Confirm run succeeds and session/token usage is recorded.
 7. Watch live updates and iterate prompt/config.
+
+## 11. Automated agent API smoke check
+
+To verify that agent auth + read/write API paths are operational without manual endpoint-by-endpoint checks, run:
+
+```sh
+pnpm smoke:agent-api
+```
+
+Required env vars:
+
+- `PAPERCLIP_URL` (for example `http://127.0.0.1:3100`)
+- `PAPERCLIP_COMPANY_ID`
+- `PAPERCLIP_AGENT_ID`
+- `PAPERCLIP_AGENT_API_KEY`
+
+Optional:
+
+- `PAPERCLIP_SMOKE_ISSUE_ID` to force a specific issue for write checks when inbox is empty.
+- `PAPERCLIP_SMOKE_CREATE_EPHEMERAL_ISSUE` (`true` by default). When inbox is empty and no explicit issue is set, the smoke script creates a temporary issue assigned to the agent, runs write/negative checks, then auto-cancels it.
+- `PAPERCLIP_SMOKE_EXPECT_NO_RUN_ID_STATUS` to pin the expected status for the negative write check without `X-Paperclip-Run-Id` (for example `401` in strict environments). If unset, the script accepts `401` or `200` and reports which behavior your deployment has.
+
+The script validates:
+
+1. `GET /api/health`
+2. `GET /api/agents/me`
+3. `GET /api/agents/me/inbox-lite`
+4. `PATCH /api/issues/:id` with `X-Paperclip-Run-Id` (expects success)
+5. same `PATCH` without `X-Paperclip-Run-Id` (expects `401` in strict mode; some deployments may currently return `200`)
+
+If the agent has no previous heartbeat runs, the smoke script first calls `POST /api/agents/{agentId}/heartbeat/invoke` (self-invoke is allowed for the same agent id) to seed a run id for mutation checks.

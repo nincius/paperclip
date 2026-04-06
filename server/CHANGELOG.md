@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **CEO heartbeat triage guidance:** when the coordinator/CEO receives a recurring "last 24h" analysis assignment, onboarding now requires posting a concise findings comment on the issue (including explicit "no incidents" when applicable) instead of exiting silently. It also explicitly forbids closing as a noop when incident signals are non-zero (`issue.review_dispatch_noop`, `issue.merge_delegate_wakeup_failed`, `stale technical queue`), requiring linked issue IDs plus owner/action or mitigation evidence.
 - **`GET /api/agents/me/inbox-lite`** now includes **`handoff_ready`** assignments and sorts them immediately after **`in_progress`** so executors see stuck handoffs / review-dispatch noops in the default heartbeat inbox. Updated default and CEO onboarding **`HEARTBEAT.md`**, **`skills/paperclip`**, **`docs/api/agents.md`**, **`docs/agents-runtime.md`**, and **`docs/guides/board-operator/runtime-runbook.md`** with handoff repair, anti-stall sweep, adapter-health, and CEO operational triage guidance.
 - **Technical review dispatch:** `resolveArtifact` treats any **github.com** PR URL in the **same `PATCH` comment** as `handoff_ready` as a valid handoff signal (not only `# handoff` / `@revisor pr` / no-new-diff), fixing **`pull_request_not_found`** dispatch no-ops when executors paste the PR link without a magic heading; recent-comments scanning uses the same precedence (explicit markers win, else newest PR URL, then description).
 
