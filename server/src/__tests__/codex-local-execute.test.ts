@@ -369,6 +369,86 @@ describe("codex execute", () => {
     }
   });
 
+  it("renders issue-assigned wake payloads even without inline comments", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-assigned-wake-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-assigned-wake",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {
+          issueId: "issue-1",
+          taskId: "issue-1",
+          wakeReason: "issue_assigned",
+          paperclipWake: {
+            reason: "issue_assigned",
+            issue: {
+              id: "issue-1",
+              identifier: "PAP-1001",
+              title: "Fix assignment wake behavior",
+              status: "todo",
+              priority: "high",
+            },
+            commentIds: [],
+            latestCommentId: null,
+            comments: [],
+            commentWindow: {
+              requestedCount: 0,
+              includedCount: 0,
+              missingCount: 0,
+            },
+            truncated: false,
+            fallbackFetchNeeded: false,
+          },
+        },
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.paperclipEnvKeys).toContain("PAPERCLIP_WAKE_PAYLOAD_JSON");
+      expect(capture.prompt).toContain("## Paperclip Wake Payload");
+      expect(capture.prompt).toContain("- reason: issue_assigned");
+      expect(capture.prompt).toContain("- issue: PAP-1001 Fix assignment wake behavior");
+      expect(capture.prompt).toContain("No inline comments were included for this wake.");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses a compact wake delta instead of the full heartbeat prompt when resuming a session", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-resume-wake-"));
     const workspace = path.join(root, "workspace");

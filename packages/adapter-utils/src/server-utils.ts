@@ -259,6 +259,8 @@ function normalizePaperclipWakeComment(value: unknown): PaperclipWakeComment | n
 
 export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayload | null {
   const payload = parseObject(value);
+  const reason = asString(payload.reason, "").trim() || null;
+  const issue = normalizePaperclipWakeIssue(payload.issue);
   const comments = Array.isArray(payload.comments)
     ? payload.comments
         .map((entry) => normalizePaperclipWakeComment(entry))
@@ -271,11 +273,11 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
         .map((entry) => entry.trim())
     : [];
 
-  if (comments.length === 0 && commentIds.length === 0) return null;
+  if (comments.length === 0 && commentIds.length === 0 && !reason && !issue) return null;
 
   return {
-    reason: asString(payload.reason, "").trim() || null,
-    issue: normalizePaperclipWakeIssue(payload.issue),
+    reason,
+    issue,
     commentIds,
     latestCommentId: asString(payload.latestCommentId, "").trim() || null,
     comments,
@@ -343,6 +345,9 @@ export function renderPaperclipWakePrompt(
   }
 
   lines.push("", "New comments in order:");
+  if (normalized.comments.length === 0) {
+    lines.push("No inline comments were included for this wake.");
+  }
 
   for (const [index, comment] of normalized.comments.entries()) {
     const authorLabel = comment.authorId

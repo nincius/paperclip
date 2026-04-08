@@ -868,7 +868,6 @@ async function buildPaperclipWakePayload(input: {
     | null;
 }) {
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
-  if (commentIds.length === 0) return null;
 
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
   const issueSummary =
@@ -948,8 +947,13 @@ async function buildPaperclipWakePayload(input: {
     });
   }
 
+  const wakeReason = readNonEmptyString(input.contextSnapshot.wakeReason);
+  if (!issueSummary && !wakeReason && commentIds.length === 0) {
+    return null;
+  }
+
   return {
-    reason: readNonEmptyString(input.contextSnapshot.wakeReason),
+    reason: wakeReason,
     issue: issueSummary
       ? {
           id: issueSummary.id,

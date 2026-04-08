@@ -35,6 +35,9 @@ Additional context variables are set when the wake has a specific trigger:
 | `PAPERCLIP_WAKE_COMMENT_ID` | Specific comment that triggered this wake |
 | `PAPERCLIP_APPROVAL_ID` | Approval that was resolved |
 | `PAPERCLIP_APPROVAL_STATUS` | Approval decision (`approved`, `rejected`) |
+| `PAPERCLIP_WAKE_PAYLOAD_JSON` | Structured wake payload (issue summary + inline comments when available) |
+
+`issue_assigned` wakes can include `PAPERCLIP_WAKE_PAYLOAD_JSON` with issue metadata even when no inline comment batch is present, so adapters can stay scoped to the assigned issue on first wake.
 
 ## Session Persistence
 
