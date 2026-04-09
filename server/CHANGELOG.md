@@ -1,5 +1,11 @@
 # @paperclipai/server
 
+## Unreleased
+
+### Security
+
+- Respostas da API passam a redigir **todos** os valores em `adapterConfig.env` (strings e bindings `plain`), mantendo apenas metadados `secret_ref`. Endpoints afetados incluem `GET /api/agents/me`, `GET /api/companies/:companyId/agents`, `GET /api/companies/:companyId/agent-configurations` e snapshots de revisão de configuração que incluem `adapterConfig`.
+
 ## 0.3.1
 
 ### Patch Changes

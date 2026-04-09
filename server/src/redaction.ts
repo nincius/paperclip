@@ -57,3 +57,40 @@ export function redactEventPayload(payload: Record<string, unknown> | null): Rec
   if (!isPlainObject(payload)) return payload;
   return sanitizeRecord(payload);
 }
+
+/**
+ * Redige todos os valores de variáveis em `adapterConfig.env` para respostas HTTP.
+ * Referências `secret_ref` são mantidas (apenas metadados); strings e bindings `plain` viram placeholder.
+ * Isto cobre chaves que `sanitizeRecord` não trataria pelo nome (ex.: DATABASE_URL, PAPERCLIP_API_URL).
+ */
+export function redactAdapterConfigEnvForApi(env: unknown): Record<string, unknown> {
+  if (!isPlainObject(env)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(env)) {
+    if (typeof raw === "string") {
+      out[key] = REDACTED_EVENT_VALUE;
+      continue;
+    }
+    if (isSecretRefBinding(raw)) {
+      out[key] = { ...raw };
+      continue;
+    }
+    if (isPlainBinding(raw)) {
+      out[key] = { type: "plain", value: REDACTED_EVENT_VALUE };
+      continue;
+    }
+    out[key] = REDACTED_EVENT_VALUE;
+  }
+  return out;
+}
+
+/** `adapterConfig` seguro para JSON de API de agente (inclui `env` redigido + demais chaves via `redactEventPayload`). */
+export function redactAdapterConfigForApiResponse(
+  adapterConfig: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const base = adapterConfig && isPlainObject(adapterConfig) ? { ...adapterConfig } : {};
+  if (Object.prototype.hasOwnProperty.call(base, "env")) {
+    base.env = redactAdapterConfigEnvForApi(base.env);
+  }
+  return redactEventPayload(base) ?? {};
+}

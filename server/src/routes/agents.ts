@@ -53,7 +53,7 @@ import {
   listAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
-import { redactEventPayload } from "../redaction.js";
+import { redactAdapterConfigForApiResponse, redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -168,8 +168,19 @@ export function agentRoutes(db: Db) {
       buildAgentAccessState(agent),
     ]);
 
+    const core =
+      options?.restricted
+        ? redactForRestrictedAgentView(agent)
+        : {
+            ...agent,
+            adapterConfig: redactAdapterConfigForApiResponse(
+              agent.adapterConfig as Record<string, unknown> | null | undefined,
+            ),
+            runtimeConfig: redactEventPayload(agent.runtimeConfig as Record<string, unknown> | null) ?? {},
+          };
+
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
+      ...core,
       chainOfCommand,
       access: accessState,
     };
@@ -716,7 +727,9 @@ export function agentRoutes(db: Db) {
       status: agent.status,
       reportsTo: agent.reportsTo,
       adapterType: agent.adapterType,
-      adapterConfig: redactEventPayload(agent.adapterConfig),
+      adapterConfig: redactAdapterConfigForApiResponse(
+        agent.adapterConfig as Record<string, unknown> | null | undefined,
+      ),
       runtimeConfig: redactEventPayload(agent.runtimeConfig),
       permissions: agent.permissions,
       updatedAt: agent.updatedAt,
@@ -728,7 +741,7 @@ export function agentRoutes(db: Db) {
     const record = snapshot as Record<string, unknown>;
     return {
       ...record,
-      adapterConfig: redactEventPayload(
+      adapterConfig: redactAdapterConfigForApiResponse(
         typeof record.adapterConfig === "object" && record.adapterConfig !== null
           ? (record.adapterConfig as Record<string, unknown>)
           : {},
@@ -967,7 +980,15 @@ export function agentRoutes(db: Db) {
     const result = await svc.list(companyId);
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs || req.actor.type === "board") {
-      res.json(result);
+      res.json(
+        result.map((row) => ({
+          ...row,
+          adapterConfig: redactAdapterConfigForApiResponse(
+            row.adapterConfig as Record<string, unknown> | null | undefined,
+          ),
+          runtimeConfig: redactEventPayload(row.runtimeConfig as Record<string, unknown> | null) ?? {},
+        })),
+      );
       return;
     }
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));

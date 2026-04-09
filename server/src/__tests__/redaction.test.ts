@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED_EVENT_VALUE, redactEventPayload, sanitizeRecord } from "../redaction.js";
+import {
+  REDACTED_EVENT_VALUE,
+  redactAdapterConfigEnvForApi,
+  redactAdapterConfigForApiResponse,
+  redactEventPayload,
+  sanitizeRecord,
+} from "../redaction.js";
 
 describe("redaction", () => {
   it("redacts sensitive keys and nested secret values", () => {
@@ -61,6 +67,39 @@ describe("redaction", () => {
     expect(redactEventPayload({ password: "hunter2", safe: "value" })).toEqual({
       password: REDACTED_EVENT_VALUE,
       safe: "value",
+    });
+  });
+
+  it("redactAdapterConfigEnvForApi redacts every plain env value, keeps secret_ref", () => {
+    const env = {
+      OPENAI_API_KEY: "sk-live",
+      PAPERCLIP_API_URL: "http://localhost:3100",
+      DB: { type: "plain", value: "postgres://x:y@host/db" },
+      REF: { type: "secret_ref", secretId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", version: 1 },
+    };
+    expect(redactAdapterConfigEnvForApi(env)).toEqual({
+      OPENAI_API_KEY: REDACTED_EVENT_VALUE,
+      PAPERCLIP_API_URL: REDACTED_EVENT_VALUE,
+      DB: { type: "plain", value: REDACTED_EVENT_VALUE },
+      REF: { type: "secret_ref", secretId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", version: 1 },
+    });
+  });
+
+  it("redactAdapterConfigForApiResponse applies env redaction then key-based redaction", () => {
+    const cfg = {
+      cwd: "/tmp/agent",
+      env: {
+        HARMLESS_URL: "http://example.com",
+        nested: { leak: "no" },
+      },
+      apiKey: "top-secret",
+    };
+    const out = redactAdapterConfigForApiResponse(cfg);
+    expect(out.cwd).toBe("/tmp/agent");
+    expect(out.apiKey).toBe(REDACTED_EVENT_VALUE);
+    expect(out.env).toEqual({
+      HARMLESS_URL: REDACTED_EVENT_VALUE,
+      nested: REDACTED_EVENT_VALUE,
     });
   });
 });
