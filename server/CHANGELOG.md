@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **Issues / GitHub:** Novo status `human_review` e guarda no `PATCH` de issue: ao transicionar para um status listado em `experimental.mergeablePrGuardTargetStatuses` (padrão apenas `human_review`), se existir work product `pull_request` + `github`, a API consulta a REST do GitHub (`mergeable` / `mergeable_state`) e recusa conflitos (`mergeable === false` ou `mergeable_state === dirty`). Sem PR GitHub ligada à issue, a transição segue permitida. Token opcional: `PAPERCLIP_GITHUB_PR_LOOKUP_TOKEN` ou `GITHUB_TOKEN`. O work product primário recebe `healthStatus: healthy` e `metadata.github` com snapshot após sucesso.
 - **Issues:** `issueService.create` now copies `assigneeAgentId` / `assigneeUserId` from `parentId` or (when distinct) `inheritExecutionWorkspaceFromIssueId` when the create payload omits assignees, and rejects agent-created issues in `todo`, `in_review`, or `blocked` if no assignee remains after that inheritance. Non-agent creates and agent-created `backlog` issues stay unchanged so triage pool behaviour remains valid.
 - Fix `GET /api/companies/{companyId}/heartbeat-runs` defaulting to an unbounded response when `limit` is omitted; the route now defaults to `limit=100` (and clamps to `1..1000`) to prevent large payload stalls and API degradation.
 

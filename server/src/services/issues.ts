@@ -17,6 +17,7 @@ import {
   issueComments,
   issueDocuments,
   issueReadStates,
+  issueWorkProducts,
   issues,
   labels,
   projectWorkspaces,
@@ -31,16 +32,26 @@ import {
   issueExecutionWorkspaceModeForPersistedWorkspace,
   parseProjectExecutionWorkspacePolicy,
 } from "./execution-workspace-policy.js";
-import { instanceSettingsService } from "./instance-settings.js";
+import { DEFAULT_MERGEABLE_PR_GUARD_STATUSES, instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { assertPrimaryGithubPrMergeableForIssue } from "./github-pr-mergeable.js";
 
-const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
+const ALL_ISSUE_STATUSES = [
+  "backlog",
+  "todo",
+  "in_progress",
+  "in_review",
+  "human_review",
+  "blocked",
+  "done",
+  "cancelled",
+];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 
 /** Statuses where agent-created issues must end up with an assignee after inheritance. */
-const AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "blocked"]);
+const AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "human_review", "blocked"]);
 
 async function loadIssueAssigneeForInheritance(
   dbConn: Pick<Db, "select">,
@@ -1637,7 +1648,8 @@ export function issueService(db: Db) {
         actorUserId,
         ...issueData
       } = data;
-      const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
+      const experimental = await instanceSettings.getExperimental();
+      const isolatedWorkspacesEnabled = experimental.enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
@@ -1646,6 +1658,79 @@ export function issueService(db: Db) {
 
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
+      }
+
+      let workProductHealthSync: {
+        workProductId: string;
+        healthStatus: "healthy" | "unhealthy" | "unknown";
+        githubMeta: Record<string, unknown>;
+      } | null = null;
+
+      const guardTargets = experimental.mergeablePrGuardTargetStatuses ?? [...DEFAULT_MERGEABLE_PR_GUARD_STATUSES];
+      if (
+        issueData.status &&
+        issueData.status !== existing.status &&
+        guardTargets.length > 0 &&
+        guardTargets.includes(issueData.status)
+      ) {
+        const prRow = await db
+          .select()
+          .from(issueWorkProducts)
+          .where(
+            and(
+              eq(issueWorkProducts.issueId, id),
+              eq(issueWorkProducts.type, "pull_request"),
+              eq(issueWorkProducts.provider, "github"),
+            ),
+          )
+          .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (prRow) {
+          const fetchRepoUrl = async (): Promise<string | null> => {
+            const wsId = existing.projectWorkspaceId;
+            if (wsId) {
+              const r = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(eq(projectWorkspaces.id, wsId))
+                .then((rows) => rows[0] ?? null);
+              if (r?.repoUrl) return r.repoUrl;
+            }
+            const pid = existing.projectId ?? prRow.projectId;
+            if (pid) {
+              const primary = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(and(eq(projectWorkspaces.projectId, pid), eq(projectWorkspaces.isPrimary, true)))
+                .limit(1)
+                .then((rows) => rows[0] ?? null);
+              if (primary?.repoUrl) return primary.repoUrl;
+              const any = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(eq(projectWorkspaces.projectId, pid))
+                .orderBy(desc(projectWorkspaces.isPrimary))
+                .limit(1)
+                .then((rows) => rows[0] ?? null);
+              return any?.repoUrl ?? null;
+            }
+            return null;
+          };
+          const sync = await assertPrimaryGithubPrMergeableForIssue({
+            issueId: id,
+            projectId: existing.projectId,
+            projectWorkspaceId: existing.projectWorkspaceId,
+            pullUrl: prRow.url,
+            externalId: prRow.externalId,
+            fetchRepoUrl,
+          });
+          workProductHealthSync = {
+            workProductId: prRow.id,
+            healthStatus: sync.healthStatus,
+            githubMeta: sync.github,
+          };
+        }
       }
 
       const patch: Partial<typeof issues.$inferInsert> = {
@@ -1733,6 +1818,30 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        if (workProductHealthSync) {
+          const cur = await tx
+            .select({ metadata: issueWorkProducts.metadata })
+            .from(issueWorkProducts)
+            .where(eq(issueWorkProducts.id, workProductHealthSync.workProductId))
+            .then((rows: Array<{ metadata: unknown }>) => rows[0] ?? null);
+          const prev =
+            cur?.metadata && typeof cur.metadata === "object" && !Array.isArray(cur.metadata)
+              ? { ...(cur.metadata as Record<string, unknown>) }
+              : {};
+          const prevGh =
+            prev.github && typeof prev.github === "object" && !Array.isArray(prev.github)
+              ? { ...(prev.github as Record<string, unknown>) }
+              : {};
+          prev.github = { ...prevGh, ...workProductHealthSync.githubMeta };
+          await tx
+            .update(issueWorkProducts)
+            .set({
+              healthStatus: workProductHealthSync.healthStatus,
+              metadata: prev,
+              updatedAt: new Date(),
+            })
+            .where(eq(issueWorkProducts.id, workProductHealthSync.workProductId));
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }

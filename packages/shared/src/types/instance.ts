@@ -9,6 +9,8 @@ export interface InstanceGeneralSettings {
 export interface InstanceExperimentalSettings {
   enableIsolatedWorkspaces: boolean;
   autoRestartDevServerWhenIdle: boolean;
+  /** Destinos de transição que exigem checagem de mergeabilidade da PR GitHub primária (resposta da API sempre inclui; clientes antigos podem omitir). */
+  mergeablePrGuardTargetStatuses?: string[];
 }
 
 export interface InstanceSettings {

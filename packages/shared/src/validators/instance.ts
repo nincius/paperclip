@@ -15,6 +15,8 @@ export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.
 export const instanceExperimentalSettingsSchema = z.object({
   enableIsolatedWorkspaces: z.boolean().default(false),
   autoRestartDevServerWhenIdle: z.boolean().default(false),
+  /** Statuses de issue que exigem PR GitHub mergeável (API) antes do PATCH; padrão human_review. Lista vazia desliga a guarda. */
+  mergeablePrGuardTargetStatuses: z.array(z.string().min(1)).optional(),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

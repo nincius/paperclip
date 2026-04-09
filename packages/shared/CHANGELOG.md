@@ -1,5 +1,11 @@
 # @paperclipai/shared
 
+## Unreleased
+
+### Minor Changes
+
+- Novo valor de status de issue `human_review` em `ISSUE_STATUSES` / inbox. Config experimental `mergeablePrGuardTargetStatuses` (lista de strings; padrão da instância `["human_review"]` quando omitido) para destinos de transição que exigem PR mergeável.
+
 ## 0.3.1
 
 ### Patch Changes

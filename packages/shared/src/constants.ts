@@ -113,6 +113,7 @@ export const ISSUE_STATUSES = [
   "todo",
   "in_progress",
   "in_review",
+  "human_review",
   "done",
   "blocked",
   "cancelled",
@@ -124,6 +125,7 @@ export const INBOX_MINE_ISSUE_STATUSES = [
   "todo",
   "in_progress",
   "in_review",
+  "human_review",
   "blocked",
   "done",
 ] as const;

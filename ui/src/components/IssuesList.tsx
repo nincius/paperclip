@@ -28,7 +28,7 @@ import type { Issue } from "@paperclipai/shared";
 
 /* ── Helpers ── */
 
-const statusOrder = ["in_progress", "todo", "backlog", "in_review", "blocked", "done", "cancelled"];
+const statusOrder = ["in_progress", "todo", "backlog", "in_review", "human_review", "blocked", "done", "cancelled"];
 const priorityOrder = ["critical", "high", "medium", "low"];
 
 function statusLabel(status: string): string {
@@ -67,7 +67,7 @@ const defaultViewState: IssueViewState = {
 
 const quickFilterPresets = [
   { label: "All", statuses: [] as string[] },
-  { label: "Active", statuses: ["todo", "in_progress", "in_review", "blocked"] },
+  { label: "Active", statuses: ["todo", "in_progress", "in_review", "human_review", "blocked"] },
   { label: "Backlog", statuses: ["backlog"] },
   { label: "Done", statuses: ["done", "cancelled"] },
 ];
