@@ -1137,3 +1137,194 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     });
   });
 });
+
+describeEmbeddedPostgres("issueService.create agent assignee policy", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-agent-assignee-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("rejects agent-created todo without assignee or inheritable source", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await expect(
+      svc.create(companyId, {
+        title: "Orphan todo",
+        status: "todo",
+        createdByAgentId: agentId,
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("Agent issues in todo"),
+    });
+  });
+
+  it("allows agent-created backlog without assignee", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const issue = await svc.create(companyId, {
+      title: "Unassigned pool",
+      status: "backlog",
+      createdByAgentId: agentId,
+    });
+    expect(issue.assigneeAgentId).toBeNull();
+    expect(issue.assigneeUserId).toBeNull();
+  });
+
+  it("inherits assignee from parent for agent-created todo", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const parentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: parentId,
+      companyId,
+      title: "Parent",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const child = await svc.create(companyId, {
+      parentId,
+      title: "Child todo",
+      status: "todo",
+      createdByAgentId: agentId,
+    });
+    expect(child.assigneeAgentId).toBe(agentId);
+    expect(child.parentId).toBe(parentId);
+  });
+
+  it("inherits assignee from inheritExecutionWorkspaceFromIssueId when parent is absent", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: sourceId,
+      companyId,
+      title: "Source",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const followUp = await svc.create(companyId, {
+      title: "Follow-up",
+      status: "todo",
+      createdByAgentId: agentId,
+      inheritExecutionWorkspaceFromIssueId: sourceId,
+    });
+    expect(followUp.assigneeAgentId).toBe(agentId);
+    expect(followUp.parentId).toBeNull();
+  });
+
+  it("allows todo without assignee when not agent-created", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const issue = await svc.create(companyId, {
+      title: "Triage queue",
+      status: "todo",
+      createdByUserId: "board-user",
+    });
+    expect(issue.assigneeAgentId).toBeNull();
+    expect(issue.assigneeUserId).toBeNull();
+  });
+});

@@ -51,6 +51,11 @@ POST /api/companies/{companyId}/issues
 }
 ```
 
+**Assignee behaviour on create**
+
+- If `assigneeAgentId` and `assigneeUserId` are both omitted, the server copies an assignee from the parent issue (`parentId`) when present, then—when the parent had no assignee—from `inheritExecutionWorkspaceFromIssueId` when that id differs from `parentId`.
+- Issues created with `createdByAgentId` set (typical agent API calls) must end up with an assignee when `status` is `todo`, `in_review`, or `blocked`: either supply `assigneeAgentId` / `assigneeUserId` or rely on inheritance from `parentId` / `inheritExecutionWorkspaceFromIssueId`. Agent-created `backlog` issues may remain unassigned (triage pool). Non-agent creates are unchanged.
+
 ## Update Issue
 
 ```

@@ -1,5 +1,12 @@
 # @paperclipai/server
 
+## Unreleased
+
+### Patch Changes
+
+- **Issues:** `issueService.create` now copies `assigneeAgentId` / `assigneeUserId` from `parentId` or (when distinct) `inheritExecutionWorkspaceFromIssueId` when the create payload omits assignees, and rejects agent-created issues in `todo`, `in_review`, or `blocked` if no assignee remains after that inheritance. Non-agent creates and agent-created `backlog` issues stay unchanged so triage pool behaviour remains valid.
+- Fix `GET /api/companies/{companyId}/heartbeat-runs` defaulting to an unbounded response when `limit` is omitted; the route now defaults to `limit=100` (and clamps to `1..1000`) to prevent large payload stalls and API degradation.
+
 ## 0.3.1
 
 ### Patch Changes

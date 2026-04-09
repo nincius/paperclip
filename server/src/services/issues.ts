@@ -39,6 +39,30 @@ import { getDefaultCompanyGoal } from "./goals.js";
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 
+/** Statuses where agent-created issues must end up with an assignee after inheritance. */
+const AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "blocked"]);
+
+async function loadIssueAssigneeForInheritance(
+  dbConn: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<{ assigneeAgentId: string | null; assigneeUserId: string | null } | null> {
+  const row = await dbConn
+    .select({
+      companyId: issues.companyId,
+      assigneeAgentId: issues.assigneeAgentId,
+      assigneeUserId: issues.assigneeUserId,
+    })
+    .from(issues)
+    .where(eq(issues.id, issueId))
+    .then((rows) => rows[0] ?? null);
+  if (!row || row.companyId !== companyId) return null;
+  return {
+    assigneeAgentId: row.assigneeAgentId,
+    assigneeUserId: row.assigneeUserId,
+  };
+}
+
 function assertTransition(from: string, to: string) {
   if (from === to) return;
   if (!ALL_ISSUE_STATUSES.includes(to)) {
@@ -1391,17 +1415,52 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      if (data.assigneeAgentId && data.assigneeUserId) {
+
+      const assigneeInheritanceSources = [
+        issueData.parentId,
+        inheritExecutionWorkspaceFromIssueId &&
+        inheritExecutionWorkspaceFromIssueId !== issueData.parentId
+          ? inheritExecutionWorkspaceFromIssueId
+          : null,
+      ].filter((id): id is string => typeof id === "string");
+
+      if (!issueData.assigneeAgentId && !issueData.assigneeUserId) {
+        for (const sourceId of assigneeInheritanceSources) {
+          const inherited = await loadIssueAssigneeForInheritance(db, companyId, sourceId);
+          if (inherited?.assigneeAgentId) {
+            issueData.assigneeAgentId = inherited.assigneeAgentId;
+            break;
+          }
+          if (inherited?.assigneeUserId) {
+            issueData.assigneeUserId = inherited.assigneeUserId;
+            break;
+          }
+        }
+      }
+
+      if (issueData.assigneeAgentId && issueData.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (data.assigneeAgentId) {
-        await assertAssignableAgent(companyId, data.assigneeAgentId);
+      if (issueData.assigneeAgentId) {
+        await assertAssignableAgent(companyId, issueData.assigneeAgentId);
       }
-      if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
+      if (issueData.assigneeUserId) {
+        await assertAssignableUser(companyId, issueData.assigneeUserId);
       }
-      if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
+      if (data.status === "in_progress" && !issueData.assigneeAgentId && !issueData.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
+      }
+
+      const effectiveCreateStatus = issueData.status ?? "backlog";
+      if (
+        issueData.createdByAgentId &&
+        AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE.has(effectiveCreateStatus) &&
+        !issueData.assigneeAgentId &&
+        !issueData.assigneeUserId
+      ) {
+        throw unprocessable(
+          "Agent issues in todo, in_review, or blocked require assigneeAgentId, assigneeUserId, or an assignee inherited from parentId / inheritExecutionWorkspaceFromIssueId",
+        );
       }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
