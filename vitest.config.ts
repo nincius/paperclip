@@ -8,6 +8,14 @@ export default defineConfig({
     maxWorkers,
     minWorkers: 1,
     projects: [
+      {
+        test: {
+          name: "scripts",
+          root: "./scripts",
+          environment: "node",
+          include: ["**/*.{test,spec}.ts"],
+        },
+      },
       "packages/db",
       "packages/adapters/codex-local",
       "packages/adapters/opencode-local",

@@ -31,6 +31,9 @@ server/src/**/*.js.map
 server/src/**/*.d.ts
 server/src/**/*.d.ts.map
 tmp/
+# Worktrees na raiz (não mascarar docs/paperclip/)
+/paperclip/
+.worktrees/
 feedback-export-*
 
 # Local agent/debug stderr captures (ad-hoc runs; do not commit)
