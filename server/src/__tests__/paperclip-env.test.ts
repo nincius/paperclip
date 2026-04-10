@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { buildPaperclipEnv } from "../adapters/utils.js";
+import { applyAdapterConfigEnvOverrides, buildPaperclipEnv } from "../adapters/utils.js";
 
 const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 const ORIGINAL_PAPERCLIP_LISTEN_HOST = process.env.PAPERCLIP_LISTEN_HOST;
@@ -22,6 +22,31 @@ afterEach(() => {
 
   if (ORIGINAL_PORT === undefined) delete process.env.PORT;
   else process.env.PORT = ORIGINAL_PORT;
+});
+
+describe("applyAdapterConfigEnvOverrides", () => {
+  it("does not let adapter config overwrite runtime PAPERCLIP_AGENT_ID", () => {
+    const env: Record<string, string> = {
+      PAPERCLIP_AGENT_ID: "real-agent",
+      PAPERCLIP_COMPANY_ID: "co-1",
+      PAPERCLIP_API_URL: "http://localhost:3100",
+    };
+    applyAdapterConfigEnvOverrides(env, {
+      PAPERCLIP_AGENT_ID: "wrong-agent",
+      GH_TOKEN: "gho_ok",
+    });
+    expect(env.PAPERCLIP_AGENT_ID).toBe("real-agent");
+    expect(env.GH_TOKEN).toBe("gho_ok");
+  });
+
+  it("still merges allowlisted PAPERCLIP_API_KEY from adapter config", () => {
+    const env: Record<string, string> = {
+      PAPERCLIP_AGENT_ID: "a1",
+      PAPERCLIP_COMPANY_ID: "c1",
+    };
+    applyAdapterConfigEnvOverrides(env, { PAPERCLIP_API_KEY: "explicit-jwt" });
+    expect(env.PAPERCLIP_API_KEY).toBe("explicit-jwt");
+  });
 });
 
 describe("buildPaperclipEnv", () => {

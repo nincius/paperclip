@@ -28,6 +28,7 @@ export const resolvePathValue = serverUtils.resolvePathValue;
 export const renderTemplate = serverUtils.renderTemplate;
 export const redactEnvForLogs = serverUtils.redactEnvForLogs;
 export const buildPaperclipEnv = serverUtils.buildPaperclipEnv;
+export const applyAdapterConfigEnvOverrides = serverUtils.applyAdapterConfigEnvOverrides;
 export const defaultPathForPlatform = serverUtils.defaultPathForPlatform;
 export const ensurePathInEnv = serverUtils.ensurePathInEnv;
 export const ensureAbsoluteDirectory = serverUtils.ensureAbsoluteDirectory;

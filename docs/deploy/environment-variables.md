@@ -32,7 +32,9 @@ These are set automatically by the server when invoking agents:
 |----------|-------------|
 | `PAPERCLIP_AGENT_ID` | Agent's unique ID |
 | `PAPERCLIP_COMPANY_ID` | Company ID |
-| `PAPERCLIP_API_URL` | Paperclip API base URL |
+| `PAPERCLIP_API_URL` | Paperclip API base URL (e.g. `http://127.0.0.1:3100`; **no** trailing `/api`) |
+
+**Manual shells:** this is normally set only for processes spawned by Paperclip. For ad-hoc `curl` or scripts in your terminal, `export PAPERCLIP_API_URL=...` yourself. If `curl "$PAPERCLIP_API_URL/api/health"` fails with “No host part in the URL”, the variable is empty or invalid.
 | `PAPERCLIP_API_KEY` | Short-lived JWT for API auth |
 | `PAPERCLIP_RUN_ID` | Current heartbeat run ID |
 | `PAPERCLIP_TASK_ID` | Issue that triggered this wake |
@@ -41,6 +43,10 @@ These are set automatically by the server when invoking agents:
 | `PAPERCLIP_APPROVAL_ID` | Resolved approval ID |
 | `PAPERCLIP_APPROVAL_STATUS` | Approval decision |
 | `PAPERCLIP_LINKED_ISSUE_IDS` | Comma-separated linked issue IDs |
+
+### Agent `adapterConfig.env`
+
+Não cole exports completos de `paperclipai agent local-cli` em `adapterConfig.env`: o servidor injeta identidade e contexto da run e **ignora** chaves `PAPERCLIP_*` vindas dessa configuração, exceto allowlist (`PAPERCLIP_API_KEY` quando você quer forçar um JWT explícito, e `PAPERCLIP_TEST_CAPTURE_PATH` apenas em testes). Assim `PAPERCLIP_AGENT_ID` permanece alinhado ao agente da run e ao token.
 
 ## LLM Provider Keys (for adapters)
 

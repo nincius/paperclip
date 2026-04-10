@@ -421,11 +421,67 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
   return vars;
 }
 
+/**
+ * `PAPERCLIP_*` keys the runtime injects (identity, API URL, run/wake/workspace context) must not be
+ * replaced by stale values copied into `adapterConfig.env` (for example from `paperclipai agent local-cli` export).
+ */
+export const PAPERCLIP_ADAPTER_CONFIG_ENV_ALLOWLIST = new Set<string>([
+  "PAPERCLIP_API_KEY",
+  /** Test harness only — fake CLIs read captured env via this path. */
+  "PAPERCLIP_TEST_CAPTURE_PATH",
+]);
+
+export function applyAdapterConfigEnvOverrides(
+  env: Record<string, string>,
+  envConfig: Record<string, unknown>,
+): void {
+  for (const [key, value] of Object.entries(envConfig)) {
+    if (typeof value !== "string") continue;
+    if (key.startsWith("PAPERCLIP_") && !PAPERCLIP_ADAPTER_CONFIG_ENV_ALLOWLIST.has(key)) {
+      continue;
+    }
+    env[key] = value;
+  }
+}
+
 export function defaultPathForPlatform() {
   if (process.platform === "win32") {
     return "C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem";
   }
   return "/usr/local/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
+}
+
+function splitPathValue(pathValue: string): string[] {
+  const delimiter = process.platform === "win32" ? ";" : ":";
+  return pathValue.split(delimiter).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function joinPathValue(entries: string[]): string {
+  const delimiter = process.platform === "win32" ? ";" : ":";
+  return entries.join(delimiter);
+}
+
+function buildAugmentedPath(env: NodeJS.ProcessEnv): string {
+  const existingPath = typeof env.PATH === "string" && env.PATH.length > 0 ? env.PATH : (env.Path ?? "");
+  const baseEntries = splitPathValue(existingPath || defaultPathForPlatform());
+  const homeDir = (typeof env.HOME === "string" && env.HOME.length > 0 ? env.HOME : process.env.HOME) ?? "";
+
+  // Many agent CLIs are installed under ~/.local/bin or similar. Ensure these are present even when the
+  // parent Paperclip process runs under launchd (which often provides a minimal PATH).
+  const prependCandidates =
+    process.platform === "win32" || !homeDir
+      ? []
+      : [path.join(homeDir, ".local", "bin"), path.join(homeDir, ".cargo", "bin"), path.join(homeDir, "bin")];
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of [...prependCandidates, ...baseEntries]) {
+    const key = process.platform === "win32" ? entry.toLowerCase() : entry;
+    if (!entry || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(entry);
+  }
+  return joinPathValue(normalized);
 }
 
 function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
@@ -512,9 +568,8 @@ async function resolveSpawnTarget(
 }
 
 export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
-  if (typeof env.Path === "string" && env.Path.length > 0) return env;
-  return { ...env, PATH: defaultPathForPlatform() };
+  // Always normalize PATH to include common user-level install locations (e.g. ~/.local/bin).
+  return { ...env, PATH: buildAugmentedPath(env) };
 }
 
 export async function ensureAbsoluteDirectory(

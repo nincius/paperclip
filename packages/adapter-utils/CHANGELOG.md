@@ -1,5 +1,11 @@
 # @paperclipai/adapter-utils
 
+## Unreleased
+
+### Patch Changes
+
+- Adiciona `applyAdapterConfigEnvOverrides`: chaves `PAPERCLIP_*` vindas de `adapterConfig.env` deixam de sobrescrever variáveis injetadas pelo runtime (identidade, wake, workspace), exceto allowlist (`PAPERCLIP_API_KEY`, `PAPERCLIP_TEST_CAPTURE_PATH`). Evita `PAPERCLIP_AGENT_ID` incorreto quando operadores colam export de outro agente.
+
 ## 0.3.1
 
 ### Patch Changes
