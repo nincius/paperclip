@@ -57,3 +57,34 @@ export function redactEventPayload(payload: Record<string, unknown> | null): Rec
   if (!isPlainObject(payload)) return payload;
   return sanitizeRecord(payload);
 }
+
+export function redactAdapterConfigEnvForApi(env: unknown): Record<string, unknown> {
+  if (!isPlainObject(env)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(env)) {
+    if (typeof raw === "string") {
+      out[key] = REDACTED_EVENT_VALUE;
+      continue;
+    }
+    if (isSecretRefBinding(raw)) {
+      out[key] = { ...raw };
+      continue;
+    }
+    if (isPlainBinding(raw)) {
+      out[key] = { type: "plain", value: REDACTED_EVENT_VALUE };
+      continue;
+    }
+    out[key] = REDACTED_EVENT_VALUE;
+  }
+  return out;
+}
+
+export function redactAdapterConfigForApiResponse(
+  adapterConfig: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const base = adapterConfig && isPlainObject(adapterConfig) ? { ...adapterConfig } : {};
+  if (Object.prototype.hasOwnProperty.call(base, "env")) {
+    base.env = redactAdapterConfigEnvForApi(base.env);
+  }
+  return redactEventPayload(base) ?? {};
+}
