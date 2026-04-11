@@ -285,4 +285,33 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentRole: "engineer",
     });
   });
+
+
+  it("skips reaping when the run is younger than staleThresholdMs", async () => {
+    const { runId } = await seedRunFixture({
+      processPid: 999_999_999, // Definitely dead
+    });
+    const heartbeat = heartbeatService(db);
+    
+    const now = Date.now();
+    // Set updatedAt to 10s ago
+    await db.update(heartbeatRuns).set({ updatedAt: new Date(now - 10000) }).where(eq(heartbeatRuns.id, runId));
+    
+    // With 30s threshold, it should SKIP reaping
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 30000 });
+    expect(result.reaped).toBe(0);
+    
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+    
+    // Set updatedAt to 40s ago
+    await db.update(heartbeatRuns).set({ updatedAt: new Date(now - 40000) }).where(eq(heartbeatRuns.id, runId));
+    
+    // With 30s threshold, it should REAP
+    const result2 = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 30000 });
+    expect(result2.reaped).toBe(1);
+    
+    const run2 = await heartbeat.getRun(runId);
+    expect(run2?.status).toBe("failed");
+  });
 });
