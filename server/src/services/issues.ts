@@ -13,22 +13,18 @@ import {
   issueAttachments,
   issueInboxArchives,
   issueLabels,
+  issueRelations,
   issueComments,
   issueDocuments,
   issueReadStates,
+  issueWorkProducts,
   issues,
   labels,
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
-import {
-  ISSUE_STATUSES,
-  ISSUE_STATUS_TRANSITIONS,
-  ISSUE_TERMINAL_STATUSES,
-  type IssueCurrentOwner,
-  extractAgentMentionIds,
-  extractProjectMentionIds,
-} from "@paperclipai/shared";
+import type { IssueRelationIssueSummary } from "@paperclipai/shared";
+import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
@@ -36,32 +32,52 @@ import {
   issueExecutionWorkspaceModeForPersistedWorkspace,
   parseProjectExecutionWorkspacePolicy,
 } from "./execution-workspace-policy.js";
-import { instanceSettingsService } from "./instance-settings.js";
+import { DEFAULT_MERGEABLE_PR_GUARD_STATUSES, instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { assertPrimaryGithubPrMergeableForIssue } from "./github-pr-mergeable.js";
 
+const ALL_ISSUE_STATUSES = [
+  "backlog",
+  "todo",
+  "in_progress",
+  "in_review",
+  "human_review",
+  "blocked",
+  "done",
+  "cancelled",
+];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
+
+/** Statuses where agent-created issues must end up with an assignee after inheritance. */
+const AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "human_review", "blocked"]);
+
+async function loadIssueAssigneeForInheritance(
+  dbConn: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<{ assigneeAgentId: string | null; assigneeUserId: string | null } | null> {
+  const row = await dbConn
+    .select({
+      companyId: issues.companyId,
+      assigneeAgentId: issues.assigneeAgentId,
+      assigneeUserId: issues.assigneeUserId,
+    })
+    .from(issues)
+    .where(eq(issues.id, issueId))
+    .then((rows) => rows[0] ?? null);
+  if (!row || row.companyId !== companyId) return null;
+  return {
+    assigneeAgentId: row.assigneeAgentId,
+    assigneeUserId: row.assigneeUserId,
+  };
+}
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
-  if (!ISSUE_STATUSES.includes(to as typeof ISSUE_STATUSES[number])) {
-    if (to === "in_review") {
-      throw conflict(
-        "Unknown issue status: in_review. Legacy in_review was replaced by handoff_ready, technical_review, and human_review. Use handoff_ready to dispatch technical review.",
-      );
-    }
+  if (!ALL_ISSUE_STATUSES.includes(to)) {
     throw conflict(`Unknown issue status: ${to}`);
-  }
-  if (!ISSUE_STATUSES.includes(from as typeof ISSUE_STATUSES[number])) return;
-  const allowed = ISSUE_STATUS_TRANSITIONS[from as typeof ISSUE_STATUSES[number]];
-  if (!allowed?.includes(to as typeof ISSUE_STATUSES[number])) {
-    if (to === "human_review" && from !== "technical_review") {
-      throw conflict(
-        `Invalid issue status transition: ${from} -> ${to}. Move the issue into handoff_ready first; Paperclip advances technical_review -> human_review after technical review is complete.`,
-      );
-    }
-    throw conflict(`Invalid issue status transition: ${from} -> ${to}`);
   }
 }
 
@@ -83,16 +99,6 @@ function applyStatusSideEffects(
   return patch;
 }
 
-function statusRequiresAssignee(status: string | undefined) {
-  return status === "claimed" || status === "in_progress";
-}
-
-function assertInProgressTransitionUsesCheckout(currentStatus: string, nextStatus: string | undefined) {
-  if (nextStatus !== "in_progress") return;
-  if (currentStatus === "claimed") return;
-  throw unprocessable("Use POST /api/issues/:id/checkout to move an issue into in_progress.");
-}
-
 export interface IssueFilters {
   status?: string;
   assigneeAgentId?: string;
@@ -109,6 +115,7 @@ export interface IssueFilters {
   originId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
+  limit?: number;
 }
 
 type IssueRow = typeof issues.$inferSelect;
@@ -125,7 +132,6 @@ type IssueActiveRunRow = {
 };
 type IssueWithLabels = IssueRow & { labels: IssueLabelRow[]; labelIds: string[] };
 type IssueWithLabelsAndRun = IssueWithLabels & { activeRun: IssueActiveRunRow | null };
-type IssueWithCurrentOwner<TIssue> = TIssue & { currentOwner: IssueCurrentOwner | null };
 type IssueUserCommentStats = {
   issueId: string;
   myLastCommentAt: Date | null;
@@ -146,7 +152,12 @@ type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
+  blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+};
+type IssueRelationSummaryMap = {
+  blockedBy: IssueRelationIssueSummary[];
+  blocks: IssueRelationIssueSummary[];
 };
 
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
@@ -155,8 +166,6 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const TERMINAL_ISSUE_STATUSES = new Set(ISSUE_TERMINAL_STATUSES);
-const REVIEW_DISPATCH_ORIGIN_KIND = "technical_review_dispatch";
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -515,181 +524,6 @@ async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWith
   });
 }
 
-type CurrentOwnerIssueLike = {
-  id: string;
-  status: string;
-  assigneeAgentId: string | null;
-  assigneeUserId: string | null;
-};
-
-type ReviewChildSummary = {
-  parentId: string | null;
-  status: string;
-  assigneeAgentId: string | null;
-  assigneeUserId: string | null;
-  updatedAt: Date;
-  createdAt: Date;
-};
-
-async function reviewChildMapForIssues(
-  dbOrTx: any,
-  issueRows: CurrentOwnerIssueLike[],
-): Promise<Map<string, ReviewChildSummary>> {
-  const handoffIssueIds = issueRows
-    .filter((issue) => issue.status === "handoff_ready")
-    .map((issue) => issue.id);
-  const map = new Map<string, ReviewChildSummary>();
-  if (handoffIssueIds.length === 0) return map;
-
-  const rows = await dbOrTx
-    .select({
-      parentId: issues.parentId,
-      status: issues.status,
-      assigneeAgentId: issues.assigneeAgentId,
-      assigneeUserId: issues.assigneeUserId,
-      updatedAt: issues.updatedAt,
-      createdAt: issues.createdAt,
-    })
-    .from(issues)
-    .where(
-      and(
-        inArray(issues.parentId, handoffIssueIds),
-        eq(issues.originKind, REVIEW_DISPATCH_ORIGIN_KIND),
-        isNull(issues.hiddenAt),
-      ),
-    )
-    .orderBy(desc(issues.updatedAt), desc(issues.createdAt));
-
-  for (const row of rows) {
-    if (!row.parentId) continue;
-    if (TERMINAL_ISSUE_STATUSES.has(row.status as typeof ISSUE_TERMINAL_STATUSES[number])) continue;
-    if (!map.has(row.parentId)) {
-      map.set(row.parentId, row);
-    }
-  }
-
-  return map;
-}
-
-function resolveCurrentOwner(
-  issue: CurrentOwnerIssueLike,
-  reviewChild: ReviewChildSummary | null | undefined,
-): IssueCurrentOwner | null {
-  if (issue.status === "done" || issue.status === "cancelled") return null;
-
-  if (issue.status === "handoff_ready") {
-    if (reviewChild?.assigneeAgentId) {
-      return {
-        actorType: "agent",
-        role: "technical_reviewer",
-        agentId: reviewChild.assigneeAgentId,
-        userId: null,
-        label: "Technical reviewer",
-      };
-    }
-    if (reviewChild?.assigneeUserId) {
-      return {
-        actorType: "user",
-        role: "technical_reviewer",
-        agentId: null,
-        userId: reviewChild.assigneeUserId,
-        label: "Technical reviewer",
-      };
-    }
-    return {
-      actorType: "unassigned",
-      role: "technical_reviewer",
-      agentId: null,
-      userId: null,
-      label: "Technical reviewer",
-    };
-  }
-
-  if (issue.status === "human_review") {
-    if (issue.assigneeUserId) {
-      if (issue.assigneeUserId === "local-board") {
-        return {
-          actorType: "board",
-          role: "human_reviewer",
-          agentId: null,
-          userId: null,
-          label: "Board",
-        };
-      }
-      return {
-        actorType: "user",
-        role: "human_reviewer",
-        agentId: null,
-        userId: issue.assigneeUserId,
-        label: "Human reviewer",
-      };
-    }
-    if (issue.assigneeAgentId) {
-      return {
-        actorType: "agent",
-        role: "human_reviewer",
-        agentId: issue.assigneeAgentId,
-        userId: null,
-        label: "Human reviewer",
-      };
-    }
-    return {
-      actorType: "board",
-      role: "human_reviewer",
-      agentId: null,
-      userId: null,
-      label: "Board",
-    };
-  }
-
-  if (issue.assigneeAgentId) {
-    return {
-      actorType: "agent",
-      role: "assignee",
-      agentId: issue.assigneeAgentId,
-      userId: null,
-      label: "Assigned agent",
-    };
-  }
-  if (issue.assigneeUserId) {
-    if (issue.assigneeUserId === "local-board") {
-      return {
-        actorType: "board",
-        role: "assignee",
-        agentId: null,
-        userId: null,
-        label: "Board",
-      };
-    }
-    return {
-      actorType: "user",
-      role: "assignee",
-      agentId: null,
-      userId: issue.assigneeUserId,
-      label: "Assigned user",
-    };
-  }
-  return {
-    actorType: "unassigned",
-    role: "queue",
-    agentId: null,
-    userId: null,
-    label: issue.status === "backlog" ? "Backlog" : "Unassigned",
-  };
-}
-
-async function withCurrentOwners<TIssue extends CurrentOwnerIssueLike>(
-  dbOrTx: any,
-  issueRows: TIssue[],
-): Promise<Array<IssueWithCurrentOwner<TIssue>>> {
-  if (issueRows.length === 0) return [];
-  const reviewChildByParentId = await reviewChildMapForIssues(dbOrTx, issueRows);
-  return issueRows.map((issue) => ({
-    ...issue,
-    currentOwner: resolveCurrentOwner(issue, reviewChildByParentId.get(issue.id)),
-  }));
-}
-
 const ACTIVE_RUN_STATUSES = ["queued", "running"];
 
 async function activeRunMapForIssues(
@@ -884,6 +718,184 @@ export function issueService(db: Db) {
     );
   }
 
+  async function getIssueRelationSummaryMap(
+    companyId: string,
+    issueIds: string[],
+    dbOrTx: DbReader = db,
+  ): Promise<Map<string, IssueRelationSummaryMap>> {
+    const uniqueIssueIds = [...new Set(issueIds)];
+    const empty = new Map<string, IssueRelationSummaryMap>();
+    for (const issueId of uniqueIssueIds) {
+      empty.set(issueId, { blockedBy: [], blocks: [] });
+    }
+    if (uniqueIssueIds.length === 0) return empty;
+
+    const [blockedByRows, blockingRows] = await Promise.all([
+      dbOrTx
+        .select({
+          currentIssueId: issueRelations.relatedIssueId,
+          relatedId: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+          priority: issues.priority,
+          assigneeAgentId: issues.assigneeAgentId,
+          assigneeUserId: issues.assigneeUserId,
+        })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(
+          and(
+            eq(issueRelations.companyId, companyId),
+            eq(issueRelations.type, "blocks"),
+            inArray(issueRelations.relatedIssueId, uniqueIssueIds),
+          ),
+        ),
+      dbOrTx
+        .select({
+          currentIssueId: issueRelations.issueId,
+          relatedId: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+          priority: issues.priority,
+          assigneeAgentId: issues.assigneeAgentId,
+          assigneeUserId: issues.assigneeUserId,
+        })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+        .where(
+          and(
+            eq(issueRelations.companyId, companyId),
+            eq(issueRelations.type, "blocks"),
+            inArray(issueRelations.issueId, uniqueIssueIds),
+          ),
+        ),
+    ]);
+
+    for (const row of blockedByRows) {
+      empty.get(row.currentIssueId)?.blockedBy.push({
+        id: row.relatedId,
+        identifier: row.identifier,
+        title: row.title,
+        status: row.status as IssueRelationIssueSummary["status"],
+        priority: row.priority as IssueRelationIssueSummary["priority"],
+        assigneeAgentId: row.assigneeAgentId,
+        assigneeUserId: row.assigneeUserId,
+      });
+    }
+    for (const row of blockingRows) {
+      empty.get(row.currentIssueId)?.blocks.push({
+        id: row.relatedId,
+        identifier: row.identifier,
+        title: row.title,
+        status: row.status as IssueRelationIssueSummary["status"],
+        priority: row.priority as IssueRelationIssueSummary["priority"],
+        assigneeAgentId: row.assigneeAgentId,
+        assigneeUserId: row.assigneeUserId,
+      });
+    }
+
+    for (const relations of empty.values()) {
+      relations.blockedBy.sort((a, b) => a.title.localeCompare(b.title));
+      relations.blocks.sort((a, b) => a.title.localeCompare(b.title));
+    }
+
+    return empty;
+  }
+
+  async function assertNoBlockingCycles(
+    companyId: string,
+    issueId: string,
+    blockerIssueIds: string[],
+    dbOrTx: DbReader = db,
+  ) {
+    if (blockerIssueIds.length === 0) return;
+
+    const rows = await dbOrTx
+      .select({
+        blockerIssueId: issueRelations.issueId,
+        blockedIssueId: issueRelations.relatedIssueId,
+      })
+      .from(issueRelations)
+      .where(and(eq(issueRelations.companyId, companyId), eq(issueRelations.type, "blocks")));
+
+    const adjacency = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = adjacency.get(row.blockerIssueId) ?? [];
+      list.push(row.blockedIssueId);
+      adjacency.set(row.blockerIssueId, list);
+    }
+
+    for (const blockerIssueId of blockerIssueIds) {
+      const queue = [...(adjacency.get(issueId) ?? [])];
+      const visited = new Set<string>([issueId]);
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        if (current === blockerIssueId) {
+          throw unprocessable("Blocking relations cannot contain cycles");
+        }
+        if (visited.has(current)) continue;
+        visited.add(current);
+        queue.push(...(adjacency.get(current) ?? []));
+      }
+    }
+  }
+
+  async function syncBlockedByIssueIds(
+    issueId: string,
+    companyId: string,
+    blockedByIssueIds: string[],
+    actor: { agentId?: string | null; userId?: string | null } = {},
+    dbOrTx: any = db,
+  ) {
+    const deduped = [...new Set(blockedByIssueIds)];
+    if (deduped.some((candidate) => candidate === issueId)) {
+      throw unprocessable("Issue cannot be blocked by itself");
+    }
+
+    if (deduped.length > 0) {
+      const lockedIssueIds = [issueId, ...deduped].sort();
+      await dbOrTx.execute(
+        sql`SELECT ${issues.id} FROM ${issues}
+            WHERE ${and(eq(issues.companyId, companyId), inArray(issues.id, lockedIssueIds))}
+            ORDER BY ${issues.id}
+            FOR UPDATE`,
+      );
+      const relatedIssues = await dbOrTx
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), inArray(issues.id, deduped)));
+      if (relatedIssues.length !== deduped.length) {
+        throw unprocessable("Blocked-by issues must belong to the same company");
+      }
+      await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
+    }
+
+    await dbOrTx
+      .delete(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.relatedIssueId, issueId),
+          eq(issueRelations.type, "blocks"),
+        ),
+      );
+
+    if (deduped.length === 0) return;
+
+    await dbOrTx.insert(issueRelations).values(
+      deduped.map((blockerIssueId) => ({
+        companyId,
+        issueId: blockerIssueId,
+        relatedIssueId: issueId,
+        type: "blocks",
+        createdByAgentId: actor.agentId ?? null,
+        createdByUserId: actor.userId ?? null,
+      })),
+    );
+  }
+
   async function isTerminalOrMissingHeartbeatRun(runId: string) {
     const run = await db
       .select({ status: heartbeatRuns.status })
@@ -935,6 +947,9 @@ export function issueService(db: Db) {
   return {
     list: async (companyId: string, filters?: IssueFilters) => {
       const conditions = [eq(issues.companyId, companyId)];
+      const limit = typeof filters?.limit === "number" && Number.isFinite(filters.limit)
+        ? Math.max(1, Math.floor(filters.limit))
+        : undefined;
       const touchedByUserId = filters?.touchedByUserId?.trim() || undefined;
       const inboxArchivedByUserId = filters?.inboxArchivedByUserId?.trim() || undefined;
       const unreadForUserId = filters?.unreadForUserId?.trim() || undefined;
@@ -1023,7 +1038,7 @@ export function issueService(db: Db) {
         END
       `;
       const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
-      const rows = await db
+      const baseQuery = db
         .select()
         .from(issues)
         .where(and(...conditions))
@@ -1033,52 +1048,56 @@ export function issueService(db: Db) {
           desc(canonicalLastActivityAt),
           desc(issues.updatedAt),
         );
+      const rows = limit === undefined ? await baseQuery : await baseQuery.limit(limit);
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
       const withRuns = withActiveRuns(withLabels, runMap);
-      const withOwners = await withCurrentOwners(db, withRuns);
-      if (!contextUserId || withOwners.length === 0) {
-        return withOwners;
+      if (withRuns.length === 0) {
+        return withRuns;
       }
 
-      const issueIds = withOwners.map((row) => row.id);
+      const issueIds = withRuns.map((row) => row.id);
       const [statsRows, readRows, lastActivityRows] = await Promise.all([
-        db
-          .select({
-            issueId: issueComments.issueId,
-            myLastCommentAt: sql<Date | null>`
-              MAX(CASE WHEN ${issueComments.authorUserId} = ${contextUserId} THEN ${issueComments.createdAt} END)
-            `,
-            lastExternalCommentAt: sql<Date | null>`
-              MAX(
-                CASE
-                  WHEN ${issueComments.authorUserId} IS NULL OR ${issueComments.authorUserId} <> ${contextUserId}
-                  THEN ${issueComments.createdAt}
-                END
-              )
-            `,
-          })
-          .from(issueComments)
-          .where(
-            and(
-              eq(issueComments.companyId, companyId),
-              inArray(issueComments.issueId, issueIds),
-            ),
-          )
-          .groupBy(issueComments.issueId),
-        db
-          .select({
-            issueId: issueReadStates.issueId,
-            myLastReadAt: issueReadStates.lastReadAt,
-          })
-          .from(issueReadStates)
-          .where(
-            and(
-              eq(issueReadStates.companyId, companyId),
-              eq(issueReadStates.userId, contextUserId),
-              inArray(issueReadStates.issueId, issueIds),
-            ),
-          ),
+        contextUserId
+          ? db
+            .select({
+              issueId: issueComments.issueId,
+              myLastCommentAt: sql<Date | null>`
+                MAX(CASE WHEN ${issueComments.authorUserId} = ${contextUserId} THEN ${issueComments.createdAt} END)
+              `,
+              lastExternalCommentAt: sql<Date | null>`
+                MAX(
+                  CASE
+                    WHEN ${issueComments.authorUserId} IS NULL OR ${issueComments.authorUserId} <> ${contextUserId}
+                    THEN ${issueComments.createdAt}
+                  END
+                )
+              `,
+            })
+            .from(issueComments)
+            .where(
+              and(
+                eq(issueComments.companyId, companyId),
+                inArray(issueComments.issueId, issueIds),
+              ),
+            )
+            .groupBy(issueComments.issueId)
+          : Promise.resolve([]),
+        contextUserId
+          ? db
+            .select({
+              issueId: issueReadStates.issueId,
+              myLastReadAt: issueReadStates.lastReadAt,
+            })
+            .from(issueReadStates)
+            .where(
+              and(
+                eq(issueReadStates.companyId, companyId),
+                eq(issueReadStates.userId, contextUserId),
+                inArray(issueReadStates.issueId, issueIds),
+              ),
+            )
+          : Promise.resolve([]),
         Promise.all([
           db
             .select({
@@ -1154,14 +1173,23 @@ export function issueService(db: Db) {
 
       const readByIssueId = new Map(readRows.map((row) => [row.issueId, row.myLastReadAt]));
 
-      return withOwners.map((row) => ({
-        ...row,
-        ...deriveIssueUserContext(row, contextUserId, {
-          myLastCommentAt: statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
-          myLastReadAt: readByIssueId.get(row.id) ?? null,
-          lastExternalCommentAt: statsByIssueId.get(row.id)?.lastExternalCommentAt ?? null,
-        }),
-      }));
+      return withRuns.map((row) => {
+        const activity = lastActivityByIssueId.get(row.id);
+        const lastActivityAt = latestIssueActivityAt(
+          row.updatedAt,
+          activity?.latestCommentAt ?? null,
+          activity?.latestLogAt ?? null,
+        ) ?? row.updatedAt;
+        return {
+          ...row,
+          lastActivityAt,
+          ...deriveIssueUserContext(row, contextUserId, {
+            myLastCommentAt: statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
+            myLastReadAt: readByIssueId.get(row.id) ?? null,
+            lastExternalCommentAt: statsByIssueId.get(row.id)?.lastExternalCommentAt ?? null,
+          }),
+        };
+      });
     },
 
     countUnreadTouchedByUser: async (companyId: string, userId: string, status?: string) => {
@@ -1208,37 +1236,187 @@ export function issueService(db: Db) {
       return row;
     },
 
-    getById: async (id: string) => {
-      const row = await db
-        .select()
-        .from(issues)
-        .where(eq(issues.id, id))
-        .then((rows) => rows[0] ?? null);
-      if (!row) return null;
-      const [enriched] = await withIssueLabels(db, [row]);
-      const [withOwner] = await withCurrentOwners(db, [enriched]);
-      return withOwner;
+    markUnread: async (companyId: string, issueId: string, userId: string) => {
+      const deleted = await db
+        .delete(issueReadStates)
+        .where(
+          and(
+            eq(issueReadStates.companyId, companyId),
+            eq(issueReadStates.issueId, issueId),
+            eq(issueReadStates.userId, userId),
+          ),
+        )
+        .returning();
+      return deleted.length > 0;
+    },
+
+    archiveInbox: async (companyId: string, issueId: string, userId: string, archivedAt: Date = new Date()) => {
+      const now = new Date();
+      const [row] = await db
+        .insert(issueInboxArchives)
+        .values({
+          companyId,
+          issueId,
+          userId,
+          archivedAt,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [issueInboxArchives.companyId, issueInboxArchives.issueId, issueInboxArchives.userId],
+          set: {
+            archivedAt,
+            updatedAt: now,
+          },
+        })
+        .returning();
+      return row;
+    },
+
+    unarchiveInbox: async (companyId: string, issueId: string, userId: string) => {
+      const [row] = await db
+        .delete(issueInboxArchives)
+        .where(
+          and(
+            eq(issueInboxArchives.companyId, companyId),
+            eq(issueInboxArchives.issueId, issueId),
+            eq(issueInboxArchives.userId, userId),
+          ),
+        )
+        .returning();
+      return row ?? null;
+    },
+
+    getById: async (raw: string) => {
+      const id = raw.trim();
+      if (/^[A-Z]+-\d+$/i.test(id)) {
+        return getIssueByIdentifier(id);
+      }
+      if (!isUuidLike(id)) {
+        return null;
+      }
+      return getIssueByUuid(id);
     },
 
     getByIdentifier: async (identifier: string) => {
-      const row = await db
-        .select()
+      return getIssueByIdentifier(identifier);
+    },
+
+    getRelationSummaries: async (issueId: string) => {
+      const issue = await db
+        .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
-        .where(eq(issues.identifier, identifier.toUpperCase()))
+        .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
-      if (!row) return null;
-      const [enriched] = await withIssueLabels(db, [row]);
-      const [withOwner] = await withCurrentOwners(db, [enriched]);
-      return withOwner;
+      if (!issue) throw notFound("Issue not found");
+      const relations = await getIssueRelationSummaryMap(issue.companyId, [issueId], db);
+      return relations.get(issueId) ?? { blockedBy: [], blocks: [] };
+    },
+
+    listWakeableBlockedDependents: async (blockerIssueId: string) => {
+      const blockerIssue = await db
+        .select({ id: issues.id, companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, blockerIssueId))
+        .then((rows) => rows[0] ?? null);
+      if (!blockerIssue) return [];
+
+      const candidates = await db
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+          status: issues.status,
+        })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+        .where(
+          and(
+            eq(issueRelations.companyId, blockerIssue.companyId),
+            eq(issueRelations.type, "blocks"),
+            eq(issueRelations.issueId, blockerIssueId),
+          ),
+        );
+      if (candidates.length === 0) return [];
+
+      const candidateIds = candidates.map((candidate) => candidate.id);
+      const blockerRows = await db
+        .select({
+          issueId: issueRelations.relatedIssueId,
+          blockerIssueId: issueRelations.issueId,
+          blockerStatus: issues.status,
+        })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(
+          and(
+            eq(issueRelations.companyId, blockerIssue.companyId),
+            eq(issueRelations.type, "blocks"),
+            inArray(issueRelations.relatedIssueId, candidateIds),
+          ),
+        );
+
+      const blockersByIssueId = new Map<string, Array<{ blockerIssueId: string; blockerStatus: string }>>();
+      for (const row of blockerRows) {
+        const list = blockersByIssueId.get(row.issueId) ?? [];
+        list.push({ blockerIssueId: row.blockerIssueId, blockerStatus: row.blockerStatus });
+        blockersByIssueId.set(row.issueId, list);
+      }
+
+      return candidates
+        .filter((candidate) => candidate.assigneeAgentId && !["backlog", "done", "cancelled"].includes(candidate.status))
+        .map((candidate) => {
+          const blockers = blockersByIssueId.get(candidate.id) ?? [];
+          return {
+            ...candidate,
+            blockerIssueIds: blockers.map((blocker) => blocker.blockerIssueId),
+            allBlockersDone: blockers.length > 0 && blockers.every((blocker) => blocker.blockerStatus === "done"),
+          };
+        })
+        .filter((candidate) => candidate.allBlockersDone)
+        .map((candidate) => ({
+          id: candidate.id,
+          assigneeAgentId: candidate.assigneeAgentId!,
+          blockerIssueIds: candidate.blockerIssueIds,
+        }));
+    },
+
+    getWakeableParentAfterChildCompletion: async (parentIssueId: string) => {
+      const parent = await db
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+          status: issues.status,
+          companyId: issues.companyId,
+        })
+        .from(issues)
+        .where(eq(issues.id, parentIssueId))
+        .then((rows) => rows[0] ?? null);
+      if (!parent || !parent.assigneeAgentId || ["backlog", "done", "cancelled"].includes(parent.status)) {
+        return null;
+      }
+
+      const children = await db
+        .select({ id: issues.id, status: issues.status })
+        .from(issues)
+        .where(and(eq(issues.companyId, parent.companyId), eq(issues.parentId, parentIssueId)));
+      if (children.length === 0) return null;
+      if (!children.every((child) => child.status === "done" || child.status === "cancelled")) {
+        return null;
+      }
+
+      return {
+        id: parent.id,
+        assigneeAgentId: parent.assigneeAgentId,
+        childIssueIds: children.map((child) => child.id),
+      };
     },
 
     create: async (
       companyId: string,
       data: IssueCreateInput,
     ) => {
-      assertInProgressTransitionUsesCheckout("new", data.status);
       const {
         labelIds: inputLabelIds,
+        blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
         ...issueData
       } = data;
@@ -1248,23 +1426,52 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      if (data.assigneeAgentId && data.assigneeUserId) {
+
+      const assigneeInheritanceSources = [
+        issueData.parentId,
+        inheritExecutionWorkspaceFromIssueId &&
+        inheritExecutionWorkspaceFromIssueId !== issueData.parentId
+          ? inheritExecutionWorkspaceFromIssueId
+          : null,
+      ].filter((id): id is string => typeof id === "string");
+
+      if (!issueData.assigneeAgentId && !issueData.assigneeUserId) {
+        for (const sourceId of assigneeInheritanceSources) {
+          const inherited = await loadIssueAssigneeForInheritance(db, companyId, sourceId);
+          if (inherited?.assigneeAgentId) {
+            issueData.assigneeAgentId = inherited.assigneeAgentId;
+            break;
+          }
+          if (inherited?.assigneeUserId) {
+            issueData.assigneeUserId = inherited.assigneeUserId;
+            break;
+          }
+        }
+      }
+
+      if (issueData.assigneeAgentId && issueData.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (data.assigneeAgentId) {
-        await assertAssignableAgent(companyId, data.assigneeAgentId);
+      if (issueData.assigneeAgentId) {
+        await assertAssignableAgent(companyId, issueData.assigneeAgentId);
       }
-      if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
+      if (issueData.assigneeUserId) {
+        await assertAssignableUser(companyId, issueData.assigneeUserId);
       }
-      if (data.projectWorkspaceId) {
-        await assertValidProjectWorkspace(companyId, data.projectId, data.projectWorkspaceId);
+      if (data.status === "in_progress" && !issueData.assigneeAgentId && !issueData.assigneeUserId) {
+        throw unprocessable("in_progress issues require an assignee");
       }
-      if (data.executionWorkspaceId) {
-        await assertValidExecutionWorkspace(companyId, data.projectId, data.executionWorkspaceId);
-      }
-      if (statusRequiresAssignee(data.status) && !data.assigneeAgentId && !data.assigneeUserId) {
-        throw unprocessable(`${data.status} issues require an assignee`);
+
+      const effectiveCreateStatus = issueData.status ?? "backlog";
+      if (
+        issueData.createdByAgentId &&
+        AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE.has(effectiveCreateStatus) &&
+        !issueData.assigneeAgentId &&
+        !issueData.assigneeUserId
+      ) {
+        throw unprocessable(
+          "Agent issues in todo, in_review, or blocked require assigneeAgentId, assigneeUserId, or an assignee inherited from parentId / inheritExecutionWorkspaceFromIssueId",
+        );
       }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
@@ -1350,9 +1557,19 @@ export function issueService(db: Db) {
         if (executionWorkspaceId) {
           await assertValidExecutionWorkspace(companyId, issueData.projectId, executionWorkspaceId, tx);
         }
+        // Self-correcting counter: use MAX(issue_number) + 1 if the counter
+        // has drifted below the actual max, preventing identifier collisions.
+        const [maxRow] = await tx
+          .select({ maxNum: sql<number>`coalesce(max(${issues.issueNumber}), 0)` })
+          .from(issues)
+          .where(eq(issues.companyId, companyId));
+        const currentMax = maxRow?.maxNum ?? 0;
+
         const [company] = await tx
           .update(companies)
-          .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+          .set({
+            issueCounter: sql`greatest(${companies.issueCounter}, ${currentMax}) + 1`,
+          })
           .where(eq(companies.id, companyId))
           .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
 
@@ -1390,28 +1607,49 @@ export function issueService(db: Db) {
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
         }
+        if (blockedByIssueIds !== undefined) {
+          await syncBlockedByIssueIds(
+            issue.id,
+            companyId,
+            blockedByIssueIds,
+            {
+              agentId: issueData.createdByAgentId ?? null,
+              userId: issueData.createdByUserId ?? null,
+            },
+            tx,
+          );
+        }
         const [enriched] = await withIssueLabels(tx, [issue]);
-        const [withOwner] = await withCurrentOwners(tx, [enriched]);
-        return withOwner;
+        return enriched;
       });
     },
 
-    update: async (id: string, data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] }) => {
-      const existing = await db
+    update: async (
+      id: string,
+      data: Partial<typeof issues.$inferInsert> & {
+        labelIds?: string[];
+        blockedByIssueIds?: string[];
+        actorAgentId?: string | null;
+        actorUserId?: string | null;
+      },
+      dbOrTx: any = db,
+    ) => {
+      const existing = await dbOrTx
         .select()
         .from(issues)
         .where(eq(issues.id, id))
-        .then((rows) => rows[0] ?? null);
+        .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
 
-      const { labelIds: nextLabelIds, ...issueData } = data;
-      const reopeningClosedIssue =
-        issueData.status === "todo"
-        && ISSUE_TERMINAL_STATUSES.includes(existing.status as typeof ISSUE_TERMINAL_STATUSES[number]);
-      if (issueData.status === "in_progress" && existing.status !== "in_progress") {
-        assertInProgressTransitionUsesCheckout(existing.status, issueData.status);
-      }
-      const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
+      const {
+        labelIds: nextLabelIds,
+        blockedByIssueIds,
+        actorAgentId,
+        actorUserId,
+        ...issueData
+      } = data;
+      const experimental = await instanceSettings.getExperimental();
+      const isolatedWorkspacesEnabled = experimental.enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
@@ -1419,8 +1657,79 @@ export function issueService(db: Db) {
       }
 
       if (issueData.status) {
-        if (!reopeningClosedIssue) {
-          assertTransition(existing.status, issueData.status);
+        assertTransition(existing.status, issueData.status);
+      }
+
+      let workProductHealthSync: {
+        workProductId: string;
+        healthStatus: "healthy" | "unhealthy" | "unknown";
+        githubMeta: Record<string, unknown>;
+      } | null = null;
+
+      const guardTargets = experimental.mergeablePrGuardTargetStatuses ?? [...DEFAULT_MERGEABLE_PR_GUARD_STATUSES];
+      if (
+        issueData.status &&
+        issueData.status !== existing.status &&
+        guardTargets.length > 0 &&
+        guardTargets.includes(issueData.status)
+      ) {
+        const prRow = await db
+          .select()
+          .from(issueWorkProducts)
+          .where(
+            and(
+              eq(issueWorkProducts.issueId, id),
+              eq(issueWorkProducts.type, "pull_request"),
+              eq(issueWorkProducts.provider, "github"),
+            ),
+          )
+          .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (prRow) {
+          const fetchRepoUrl = async (): Promise<string | null> => {
+            const wsId = existing.projectWorkspaceId;
+            if (wsId) {
+              const r = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(eq(projectWorkspaces.id, wsId))
+                .then((rows) => rows[0] ?? null);
+              if (r?.repoUrl) return r.repoUrl;
+            }
+            const pid = existing.projectId ?? prRow.projectId;
+            if (pid) {
+              const primary = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(and(eq(projectWorkspaces.projectId, pid), eq(projectWorkspaces.isPrimary, true)))
+                .limit(1)
+                .then((rows) => rows[0] ?? null);
+              if (primary?.repoUrl) return primary.repoUrl;
+              const any = await db
+                .select({ repoUrl: projectWorkspaces.repoUrl })
+                .from(projectWorkspaces)
+                .where(eq(projectWorkspaces.projectId, pid))
+                .orderBy(desc(projectWorkspaces.isPrimary))
+                .limit(1)
+                .then((rows) => rows[0] ?? null);
+              return any?.repoUrl ?? null;
+            }
+            return null;
+          };
+          const sync = await assertPrimaryGithubPrMergeableForIssue({
+            issueId: id,
+            projectId: existing.projectId,
+            projectWorkspaceId: existing.projectWorkspaceId,
+            pullUrl: prRow.url,
+            externalId: prRow.externalId,
+            fetchRepoUrl,
+          });
+          workProductHealthSync = {
+            workProductId: prRow.id,
+            healthStatus: sync.healthStatus,
+            githubMeta: sync.github,
+          };
         }
       }
 
@@ -1437,8 +1746,8 @@ export function issueService(db: Db) {
       if (nextAssigneeAgentId && nextAssigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (statusRequiresAssignee(patch.status) && !nextAssigneeAgentId && !nextAssigneeUserId) {
-        throw unprocessable(`${patch.status} issues require an assignee`);
+      if (patch.status === "in_progress" && !nextAssigneeAgentId && !nextAssigneeUserId) {
+        throw unprocessable("in_progress issues require an assignee");
       }
       if (issueData.assigneeAgentId) {
         await assertAssignableAgent(existing.companyId, issueData.assigneeAgentId);
@@ -1467,6 +1776,7 @@ export function issueService(db: Db) {
       }
       if (issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
+        // Fix B: also clear the execution lock when leaving in_progress
         patch.executionRunId = null;
         patch.executionAgentNameKey = null;
         patch.executionLockedAt = null;
@@ -1476,12 +1786,13 @@ export function issueService(db: Db) {
         (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== existing.assigneeUserId)
       ) {
         patch.checkoutRunId = null;
+        // Fix B: clear execution lock on reassignment, matching checkoutRunId clear
         patch.executionRunId = null;
         patch.executionAgentNameKey = null;
         patch.executionLockedAt = null;
       }
 
-      return db.transaction(async (tx) => {
+      const runUpdate = async (tx: any) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -1505,15 +1816,52 @@ export function issueService(db: Db) {
           .set(patch)
           .where(eq(issues.id, id))
           .returning()
-          .then((rows) => rows[0] ?? null);
+          .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        if (workProductHealthSync) {
+          const cur = await tx
+            .select({ metadata: issueWorkProducts.metadata })
+            .from(issueWorkProducts)
+            .where(eq(issueWorkProducts.id, workProductHealthSync.workProductId))
+            .then((rows: Array<{ metadata: unknown }>) => rows[0] ?? null);
+          const prev =
+            cur?.metadata && typeof cur.metadata === "object" && !Array.isArray(cur.metadata)
+              ? { ...(cur.metadata as Record<string, unknown>) }
+              : {};
+          const prevGh =
+            prev.github && typeof prev.github === "object" && !Array.isArray(prev.github)
+              ? { ...(prev.github as Record<string, unknown>) }
+              : {};
+          prev.github = { ...prevGh, ...workProductHealthSync.githubMeta };
+          await tx
+            .update(issueWorkProducts)
+            .set({
+              healthStatus: workProductHealthSync.healthStatus,
+              metadata: prev,
+              updatedAt: new Date(),
+            })
+            .where(eq(issueWorkProducts.id, workProductHealthSync.workProductId));
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }
+        if (blockedByIssueIds !== undefined) {
+          await syncBlockedByIssueIds(
+            updated.id,
+            existing.companyId,
+            blockedByIssueIds,
+            {
+              agentId: actorAgentId ?? null,
+              userId: actorUserId ?? null,
+            },
+            tx,
+          );
+        }
         const [enriched] = await withIssueLabels(tx, [updated]);
-        const [withOwner] = await withCurrentOwners(tx, [enriched]);
-        return withOwner;
-      });
+        return enriched;
+      };
+
+      return dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx);
     },
 
     remove: (id: string) =>
@@ -1547,8 +1895,7 @@ export function issueService(db: Db) {
 
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
-        const [withOwner] = await withCurrentOwners(tx, [enriched]);
-        return withOwner;
+        return enriched;
       }),
 
     checkout: async (id: string, agentId: string, expectedStatuses: string[], checkoutRunId: string | null) => {
@@ -1561,6 +1908,40 @@ export function issueService(db: Db) {
       await assertAssignableAgent(issueCompany.companyId, agentId);
 
       const now = new Date();
+
+      // Fix C: staleness detection — if executionRunId references a run that is no
+      // longer queued or running, clear it before applying the execution lock condition
+      // so a dead lock can't produce a spurious 409.
+      // Wrapped in a transaction with SELECT FOR UPDATE to make the read + clear atomic,
+      // matching the existing pattern in enqueueWakeup().
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select id from issues where id = ${id} for update`,
+        );
+        const preCheckRow = await tx
+          .select({ executionRunId: issues.executionRunId })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!preCheckRow?.executionRunId) return;
+        const lockRun = await tx
+          .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, preCheckRow.executionRunId))
+          .then((rows) => rows[0] ?? null);
+        if (!lockRun || (lockRun.status !== "queued" && lockRun.status !== "running")) {
+          await tx
+            .update(issues)
+            .set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, updatedAt: now })
+            .where(
+              and(
+                eq(issues.id, id),
+                eq(issues.executionRunId, preCheckRow.executionRunId),
+              ),
+            );
+        }
+      });
+
       const sameRunAssigneeCondition = checkoutRunId
         ? and(
           eq(issues.assigneeAgentId, agentId),
@@ -1594,11 +1975,10 @@ export function issueService(db: Db) {
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
-        const [withOwner] = await withCurrentOwners(db, [enriched]);
-        return withOwner;
+        return enriched;
       }
 
-      let current = await db
+      const current = await db
         .select({
           id: issues.id,
           status: issues.status,
@@ -1611,72 +1991,6 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!current) throw notFound("Issue not found");
-
-      // Stale execution_run_id (e.g. issue back in todo after a board PATCH cleared checkout but not
-      // execution, or release() before this fix) blocks checkout because executionLockCondition requires
-      // a matching run. Mention-triggered wakes bypass enqueue-time lock cleanup, so repair here.
-      if (
-        checkoutRunId &&
-        current.executionRunId &&
-        current.executionRunId !== checkoutRunId &&
-        expectedStatuses.includes(current.status) &&
-        (await isTerminalOrMissingHeartbeatRun(current.executionRunId))
-      ) {
-        const [clearedRow] = await db
-          .update(issues)
-          .set({
-            executionRunId: null,
-            executionAgentNameKey: null,
-            executionLockedAt: null,
-            updatedAt: new Date(),
-          })
-          .where(and(eq(issues.id, id), eq(issues.executionRunId, current.executionRunId)))
-          .returning({ id: issues.id });
-
-        if (clearedRow) {
-          const retried = await db
-            .update(issues)
-            .set({
-              assigneeAgentId: agentId,
-              assigneeUserId: null,
-              checkoutRunId,
-              executionRunId: checkoutRunId,
-              status: "in_progress",
-              startedAt: now,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(issues.id, id),
-                inArray(issues.status, expectedStatuses),
-                or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
-                or(isNull(issues.executionRunId), eq(issues.executionRunId, checkoutRunId)),
-              ),
-            )
-            .returning()
-            .then((rows) => rows[0] ?? null);
-
-          if (retried) {
-            const [enriched] = await withIssueLabels(db, [retried]);
-            const [withOwner] = await withCurrentOwners(db, [enriched]);
-            return withOwner;
-          }
-
-          current = await db
-            .select({
-              id: issues.id,
-              status: issues.status,
-              assigneeAgentId: issues.assigneeAgentId,
-              checkoutRunId: issues.checkoutRunId,
-              executionRunId: issues.executionRunId,
-            })
-            .from(issues)
-            .where(eq(issues.id, id))
-            .then((rows) => rows[0] ?? null);
-
-          if (!current) throw notFound("Issue not found");
-        }
-      }
 
       if (
         current.assigneeAgentId === agentId &&
@@ -1703,11 +2017,7 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
-        if (adopted) {
-          const [enriched] = await withIssueLabels(db, [adopted]);
-          const [withOwner] = await withCurrentOwners(db, [enriched]);
-          return withOwner;
-        }
+        if (adopted) return adopted;
       }
 
       if (
@@ -1724,10 +2034,10 @@ export function issueService(db: Db) {
           expectedCheckoutRunId: current.checkoutRunId,
         });
         if (adopted) {
-          const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0]!);
+          const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0] ?? null);
+          if (!row) throw notFound("Issue not found");
           const [enriched] = await withIssueLabels(db, [row]);
-          const [withOwner] = await withCurrentOwners(db, [enriched]);
-          return withOwner;
+          return enriched;
         }
       }
 
@@ -1737,10 +2047,10 @@ export function issueService(db: Db) {
         current.status === "in_progress" &&
         sameRunLock(current.checkoutRunId, checkoutRunId)
       ) {
-        const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0]!);
+        const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0] ?? null);
+        if (!row) throw notFound("Issue not found");
         const [enriched] = await withIssueLabels(db, [row]);
-        const [withOwner] = await withCurrentOwners(db, [enriched]);
-        return withOwner;
+        return enriched;
       }
 
       throw conflict("Issue checkout conflict", {
@@ -1759,7 +2069,6 @@ export function issueService(db: Db) {
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
-          executionRunId: issues.executionRunId,
         })
         .from(issues)
         .where(eq(issues.id, id))
@@ -1773,45 +2082,6 @@ export function issueService(db: Db) {
         sameRunLock(current.checkoutRunId, actorRunId)
       ) {
         return { ...current, adoptedFromRunId: null as string | null };
-      }
-
-      // Mirror checkout() "repair" path: assignee is in_progress but checkout was cleared (e.g. process
-      // loss / migration). Bind the current heartbeat run as checkout owner so workspace setup can proceed.
-      if (
-        actorRunId &&
-        current.status === "in_progress" &&
-        current.assigneeAgentId === actorAgentId &&
-        current.checkoutRunId == null &&
-        (current.executionRunId == null || current.executionRunId === actorRunId)
-      ) {
-        const now = new Date();
-        const adopted = await db
-          .update(issues)
-          .set({
-            checkoutRunId: actorRunId,
-            executionRunId: actorRunId,
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(issues.id, id),
-              eq(issues.status, "in_progress"),
-              eq(issues.assigneeAgentId, actorAgentId),
-              isNull(issues.checkoutRunId),
-              or(isNull(issues.executionRunId), eq(issues.executionRunId, actorRunId)),
-            ),
-          )
-          .returning({
-            id: issues.id,
-            status: issues.status,
-            assigneeAgentId: issues.assigneeAgentId,
-            checkoutRunId: issues.checkoutRunId,
-          })
-          .then((rows) => rows[0] ?? null);
-        if (adopted) {
-          return { ...adopted, adoptedFromRunId: null as string | null };
-        }
       }
 
       if (
@@ -1878,9 +2148,6 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
-          executionRunId: null,
-          executionAgentNameKey: null,
-          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))
@@ -1888,8 +2155,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!updated) return null;
       const [enriched] = await withIssueLabels(db, [updated]);
-      const [withOwner] = await withCurrentOwners(db, [enriched]);
-      return withOwner;
+      return enriched;
     },
 
     listLabels: (companyId: string) =>
