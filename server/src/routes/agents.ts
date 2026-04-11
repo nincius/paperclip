@@ -1316,7 +1316,7 @@ export function agentRoutes(db: Db) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    res.json(await buildAgentDetail(agent));
+    const detail = await buildAgentDetail(agent); res.json({ ...detail, adapterConfig: redactAdapterConfigForApiResponse((detail as any).adapterConfig), runtimeConfig: redactEventPayload((detail as any).runtimeConfig) });
   });
 
   router.get("/agents/me/inbox-lite", async (req, res) => {

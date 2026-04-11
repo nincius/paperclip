@@ -63,18 +63,20 @@ export function redactAdapterConfigEnvForApi(env: unknown): Record<string, unkno
   const out: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(env)) {
     if (typeof raw === "string") {
-      out[key] = REDACTED_EVENT_VALUE;
+      out[key] = { type: "plain", hasValue: raw.length > 0 };
       continue;
     }
     if (isSecretRefBinding(raw)) {
-      out[key] = { ...raw };
+      out[key] = { type: "secret_ref", hasValue: true };
       continue;
     }
     if (isPlainBinding(raw)) {
-      out[key] = { type: "plain", value: REDACTED_EVENT_VALUE };
+      const has = raw.value !== undefined && raw.value !== null && String(raw.value).length > 0;
+      out[key] = { type: "plain", hasValue: has };
       continue;
     }
-    out[key] = REDACTED_EVENT_VALUE;
+    const has = raw !== undefined && raw !== null;
+    out[key] = { type: "unknown", hasValue: has };
   }
   return out;
 }
@@ -83,8 +85,12 @@ export function redactAdapterConfigForApiResponse(
   adapterConfig: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> {
   const base = adapterConfig && isPlainObject(adapterConfig) ? { ...adapterConfig } : {};
+  let envOut: Record<string, unknown> | undefined;
   if (Object.prototype.hasOwnProperty.call(base, "env")) {
-    base.env = redactAdapterConfigEnvForApi(base.env);
+    envOut = redactAdapterConfigEnvForApi((base as Record<string, unknown>).env);
+    delete (base as Record<string, unknown>).env;
   }
-  return redactEventPayload(base) ?? {};
+  const sanitized = redactEventPayload(base) ?? {};
+  if (envOut) (sanitized as Record<string, unknown>).env = envOut;
+  return sanitized;
 }
