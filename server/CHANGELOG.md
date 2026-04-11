@@ -5,7 +5,12 @@
 ### Patch Changes
 
 - **Adapters / runtime env:** mesclagem de `adapterConfig.env` nos executores locais e no adapter `process` passa a ignorar `PAPERCLIP_*` não allowlisted, alinhando o ambiente do filho ao JWT e ao contexto da run (corrige `PAPERCLIP_AGENT_ID` divergente de `/api/agents/me` quando havia export colado de outro agente).
-- **Issues:** `issueService.create` now copies `assigneeAgentId` / `assigneeUserId` from `parentId` or (when distinct) `inheritExecutionWorkspaceFromIssueId` when the create payload omits assignees, and rejects agent-created issues in `todo`, `in_review`, or `blocked` if no assignee remains after that inheritance. Non-agent creates and agent-created `backlog` issues stay unchanged so triage pool behaviour remains valid.
+- **Issues:** `issueService.create` now copies `assigneeAgentId` / `assigneeUserId` from `parentId` or (when distinct) `inheritExecutionWorkspaceFromIssueId` when the create payload omits assignees.
+- **Issues:** validação obrigatória de assignee em `todo`, `in_review` e `blocked`:
+  - `POST /api/companies/{companyId}/issues` e `PATCH /api/issues/:id` passam a rejeitar esses estados sem responsável, independentemente de quem cria.
+  - A verificação em `PATCH` usa o status efetivo após o patch (cobre `null` explícito para impedir limpeza do assignee em estados que exigem responsável).
+  - `in_progress` permanece exigindo assignee.
+  - Compatível com herança de assignee via `parentId` / `inheritExecutionWorkspaceFromIssueId`.
 - Fix `GET /api/companies/{companyId}/heartbeat-runs` defaulting to an unbounded response when `limit` is omitted; the route now defaults to `limit=100` (and clamps to `1..1000`) to prevent large payload stalls and API degradation.
 
 ## 0.3.1

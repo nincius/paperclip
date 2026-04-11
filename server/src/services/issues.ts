@@ -39,8 +39,12 @@ import { getDefaultCompanyGoal } from "./goals.js";
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 
-/** Statuses where agent-created issues must end up with an assignee after inheritance. */
-const AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "blocked"]);
+/**
+ * Statuses where issues must end up with um responsável (assignee) definido.
+ * Aplica-se tanto para criação (após herança de parent/inheritExecutionWorkspaceFromIssueId)
+ * quanto para atualização (status efetivo após o patch).
+ */
+const STATUSES_REQUIRING_ASSIGNEE = new Set(["todo", "in_review", "blocked", "in_progress"]);
 
 async function loadIssueAssigneeForInheritance(
   dbConn: Pick<Db, "select">,
@@ -1447,20 +1451,15 @@ export function issueService(db: Db) {
       if (issueData.assigneeUserId) {
         await assertAssignableUser(companyId, issueData.assigneeUserId);
       }
-      if (data.status === "in_progress" && !issueData.assigneeAgentId && !issueData.assigneeUserId) {
-        throw unprocessable("in_progress issues require an assignee");
-      }
-
+      // Regras de obrigatoriedade de responsável em criação
       const effectiveCreateStatus = issueData.status ?? "backlog";
       if (
-        issueData.createdByAgentId &&
-        AGENT_CREATED_STATUSES_REQUIRING_ASSIGNEE.has(effectiveCreateStatus) &&
+        STATUSES_REQUIRING_ASSIGNEE.has(effectiveCreateStatus) &&
         !issueData.assigneeAgentId &&
         !issueData.assigneeUserId
       ) {
-        throw unprocessable(
-          "Agent issues in todo, in_review, or blocked require assigneeAgentId, assigneeUserId, or an assignee inherited from parentId / inheritExecutionWorkspaceFromIssueId",
-        );
+        const statusName = effectiveCreateStatus;
+        throw unprocessable(`${statusName} issues require an assignee`);
       }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
@@ -1661,8 +1660,10 @@ export function issueService(db: Db) {
       if (nextAssigneeAgentId && nextAssigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (patch.status === "in_progress" && !nextAssigneeAgentId && !nextAssigneeUserId) {
-        throw unprocessable("in_progress issues require an assignee");
+      // Regras de obrigatoriedade de responsável em atualização (cobre null explícito)
+      const effectiveUpdateStatus = issueData.status ?? existing.status;
+      if (STATUSES_REQUIRING_ASSIGNEE.has(effectiveUpdateStatus) && !nextAssigneeAgentId && !nextAssigneeUserId) {
+        throw unprocessable(`${effectiveUpdateStatus} issues require an assignee`);
       }
       if (issueData.assigneeAgentId) {
         await assertAssignableAgent(existing.companyId, issueData.assigneeAgentId);

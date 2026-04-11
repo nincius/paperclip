@@ -963,11 +963,23 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
 
   it("persists blocked-by relations and exposes both blockedBy and blocks summaries", async () => {
     const companyId = randomUUID();
+    const agentId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
     });
 
     const blockerId = randomUUID();
@@ -979,6 +991,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         title: "Blocker",
         status: "todo",
         priority: "high",
+        assigneeAgentId: agentId,
       },
       {
         id: blockedId,
@@ -986,6 +999,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         title: "Blocked issue",
         status: "blocked",
         priority: "medium",
+        assigneeAgentId: agentId,
       },
     ]);
 
@@ -1012,8 +1026,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     const issueA = randomUUID();
     const issueB = randomUUID();
     await db.insert(issues).values([
-      { id: issueA, companyId, title: "Issue A", status: "todo", priority: "medium" },
-      { id: issueB, companyId, title: "Issue B", status: "todo", priority: "medium" },
+      { id: issueA, companyId, title: "Issue A", status: "todo", priority: "medium", assigneeAgentId: randomUUID() },
+      { id: issueB, companyId, title: "Issue B", status: "todo", priority: "medium", assigneeAgentId: randomUUID() },
     ]);
 
     await svc.update(issueA, { blockedByIssueIds: [issueB] });
@@ -1195,9 +1209,7 @@ describeEmbeddedPostgres("issueService.create agent assignee policy", () => {
         status: "todo",
         createdByAgentId: agentId,
       }),
-    ).rejects.toMatchObject({
-      message: expect.stringContaining("Agent issues in todo"),
-    });
+    ).rejects.toThrow("todo issues require an assignee");
   });
 
   it("allows agent-created backlog without assignee", async () => {
@@ -1310,7 +1322,7 @@ describeEmbeddedPostgres("issueService.create agent assignee policy", () => {
     expect(followUp.parentId).toBeNull();
   });
 
-  it("allows todo without assignee when not agent-created", async () => {
+  it("rejects todo without assignee when not agent-created (board user)", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -1319,12 +1331,12 @@ describeEmbeddedPostgres("issueService.create agent assignee policy", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    const issue = await svc.create(companyId, {
-      title: "Triage queue",
-      status: "todo",
-      createdByUserId: "board-user",
-    });
-    expect(issue.assigneeAgentId).toBeNull();
-    expect(issue.assigneeUserId).toBeNull();
+    await expect(
+      svc.create(companyId, {
+        title: "Triage queue",
+        status: "todo",
+        createdByUserId: "board-user",
+      }),
+    ).rejects.toThrow("todo issues require an assignee");
   });
 });
