@@ -314,4 +314,24 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const run2 = await heartbeat.getRun(runId);
     expect(run2?.status).toBe("failed");
   });
+
+  it("fails definitively with circuit_breaker on second stale occurrence", async () => {
+    const { runId } = await seedRunFixture({
+      processLossRetryCount: 1,
+    });
+    const heartbeat = heartbeatService(db);
+    
+    const now = Date.now();
+    // Set updatedAt to 40s ago
+    await db.update(heartbeatRuns).set({ updatedAt: new Date(now - 40000) }).where(eq(heartbeatRuns.id, runId));
+    
+    // With 30s threshold, it should REAP as circuit_breaker
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 30000 });
+    expect(result.reaped).toBe(1);
+    
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("circuit_breaker");
+    expect(run?.error).toContain("[circuit_breaker]");
+  });
 });

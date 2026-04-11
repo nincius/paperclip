@@ -19,6 +19,7 @@ import {
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { runsLostInMemoryCount, runsStuckDurationSeconds } from "../metrics.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
@@ -688,6 +689,37 @@ export function deriveTaskKeyWithHeartbeatFallback(
   if (wakeSource === "timer") return HEARTBEAT_TASK_KEY;
 
   return null;
+}
+
+/** Status order aligned with agent heartbeat skill: active work before net-new todo. */
+const WAKEUP_INFER_ISSUE_STATUS_ORDER = ["in_progress", "in_review", "todo", "blocked"] as const;
+
+/**
+ * Pick one issue when a wake has no explicit `issueId` but the agent has assignments.
+ * Exported for unit tests.
+ */
+export function pickPrimaryAgentAssignmentIssueForWakeup(
+  rows: Array<{ id: string; status: string; priority: string; updatedAt: Date | string | null }>,
+): string | null {
+  if (rows.length === 0) return null;
+  const statusRank = (s: string) => {
+    const idx = WAKEUP_INFER_ISSUE_STATUS_ORDER.indexOf(s as (typeof WAKEUP_INFER_ISSUE_STATUS_ORDER)[number]);
+    return idx === -1 ? 99 : idx;
+  };
+  const priorityRank = (p: string) =>
+    p === "critical" ? 0 : p === "high" ? 1 : p === "medium" ? 2 : p === "low" ? 3 : 4;
+  const sorted = [...rows].sort((a, b) => {
+    const ra = statusRank(a.status);
+    const rb = statusRank(b.status);
+    if (ra !== rb) return ra - rb;
+    const pa = priorityRank(a.priority);
+    const pb = priorityRank(b.priority);
+    if (pa !== pb) return pa - pb;
+    const ta = new Date(a.updatedAt ?? 0).getTime();
+    const tb = new Date(b.updatedAt ?? 0).getTime();
+    return tb - ta;
+  });
+  return sorted[0]?.id ?? null;
 }
 
 export function shouldResetTaskSessionForWake(
@@ -2345,19 +2377,27 @@ export function heartbeatService(db: Db) {
         continue;
       }
 
-      const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
-      const baseMessage = run.processPid
-        ? `Process lost -- child pid ${run.processPid} is no longer running`
-        : "Process lost -- server may have restarted";
+      const shouldRetry = (run.processLossRetryCount ?? 0) < 1;
+      const isLogicalStuck = !tracksLocalChild || !run.processPid;
+      const baseMessage = isLogicalStuck
+        ? "Run stuck in \"running\" state beyond threshold (logical stagnation)"
+        : (run.processPid 
+            ? `Process lost -- child pid ${run.processPid} is no longer running`
+            : "Process lost -- server may have restarted");
+
+      const errorCode = shouldRetry ? "process_lost" : "circuit_breaker";
+      const finalMessage = shouldRetry 
+        ? `${baseMessage}; retrying once` 
+        : `[circuit_breaker] Run presa repetidamente e cancelada pelo watchdog. ${baseMessage}`;
 
       let finalizedRun = await setRunStatus(run.id, "failed", {
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
+        error: finalMessage,
+        errorCode,
         finishedAt: now,
       });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: now,
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
+        error: finalMessage,
       });
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
@@ -2378,16 +2418,21 @@ export function heartbeatService(db: Db) {
         level: "error",
         message: shouldRetry
           ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
-          : baseMessage,
+          : finalMessage,
         payload: {
           ...(run.processPid ? { processPid: run.processPid } : {}),
           ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+          stagnation: isLogicalStuck,
         },
       });
 
       await finalizeAgentStatus(run.agentId, "failed");
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
+      const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : (run.createdAt ? new Date(run.createdAt).getTime() : now.getTime());
+      const stuckDurationSeconds = (now.getTime() - refTime) / 1000;
+      runsLostInMemoryCount.inc({ agentId: run.agentId, adapterType });
+      runsStuckDurationSeconds.observe({ agentId: run.agentId }, stuckDurationSeconds);
       reaped.push(run.id);
     }
 
@@ -3652,6 +3697,32 @@ export function heartbeatService(db: Db) {
       }
       issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueId;
     }
+
+    const hasCommentWakeContext =
+      extractWakeCommentIds(enrichedContextSnapshot).length > 0 ||
+      Boolean(readNonEmptyString(enrichedContextSnapshot.commentId)) ||
+      Boolean(readNonEmptyString(enrichedContextSnapshot.wakeCommentId));
+
+    if (
+      !issueId &&
+      !issueIdFromPayload &&
+      !hasCommentWakeContext &&
+      (source === "on_demand" || source === "assignment")
+    ) {
+      const inboxRows = await issueService(db).list(agent.companyId, {
+        assigneeAgentId: agentId,
+        status: WAKEUP_INFER_ISSUE_STATUS_ORDER.join(","),
+      });
+      const inferredIssueId = pickPrimaryAgentAssignmentIssueForWakeup(inboxRows);
+      if (inferredIssueId) {
+        enrichedContextSnapshot.issueId = inferredIssueId;
+        enrichedContextSnapshot.taskId = inferredIssueId;
+        enrichedContextSnapshot.taskKey = inferredIssueId;
+        enrichedContextSnapshot.primaryAssignmentIssueInferred = true;
+        issueId = inferredIssueId;
+      }
+    }
+
     const effectiveTaskKey = readNonEmptyString(enrichedContextSnapshot.taskKey) ?? taskKey;
     const sessionBefore =
       explicitResumeSession?.sessionDisplayId ??
