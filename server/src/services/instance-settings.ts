@@ -14,6 +14,9 @@ import { eq } from "drizzle-orm";
 
 const DEFAULT_SINGLETON_KEY = "default";
 
+/** Padrão quando `mergeablePrGuardTargetStatuses` não está persistido no JSON experimental. */
+export const DEFAULT_MERGEABLE_PR_GUARD_STATUSES = ["human_review"] as const;
+
 function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
   const parsed = instanceGeneralSettingsSchema.safeParse(raw ?? {});
   if (parsed.success) {
@@ -37,11 +40,15 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     return {
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
       autoRestartDevServerWhenIdle: parsed.data.autoRestartDevServerWhenIdle ?? false,
+      mergeablePrGuardTargetStatuses: Array.isArray(parsed.data.mergeablePrGuardTargetStatuses)
+        ? [...parsed.data.mergeablePrGuardTargetStatuses]
+        : [...DEFAULT_MERGEABLE_PR_GUARD_STATUSES],
     };
   }
   return {
     enableIsolatedWorkspaces: false,
     autoRestartDevServerWhenIdle: false,
+    mergeablePrGuardTargetStatuses: [...DEFAULT_MERGEABLE_PR_GUARD_STATUSES],
   };
 }
 
